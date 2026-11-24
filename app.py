@@ -1,0 +1,2849 @@
+import os, time, re, glob, json, threading
+import streamlit as st
+import openpyxl
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+import random
+from io import BytesIO
+import difflib
+
+st.set_page_config(page_title="Automation Hub", layout="wide", page_icon="◆",
+                   initial_sidebar_state="expanded")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LOOK & FEEL
+# All styling lives here (not in .streamlit/config.toml) because the
+# Dockerfile only copies app.py into the image.
+# ─────────────────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root {
+    --ink:        #0F172A;
+    --ink-soft:   #475569;
+    --ink-faint:  #94A3B8;
+    --canvas:     #F5F6FA;
+    --surface:    #FFFFFF;
+    --line:       #E4E7EE;
+    --navy:       #0B1B34;
+    --navy-2:     #12284A;
+    --accent:     #2F5BEA;
+    --accent-2:   #1E44C4;
+    --accent-soft:#EAF0FF;
+    --gold:       #C8A24A;
+    --radius:     14px;
+    --shadow:     0 1px 2px rgba(15,23,42,.04), 0 4px 16px rgba(15,23,42,.06);
+}
+
+/* ── Base ─────────────────────────────────────────────────────────────── */
+html, body, .stApp, [class*="css"] {
+    font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+}
+.stApp { background: var(--canvas); color: var(--ink); }
+.stApp p, .stApp li, .stApp label, .stApp span { color: var(--ink); }
+[data-testid="stHeader"] { background: transparent; }
+.block-container { padding-top: 2.2rem; padding-bottom: 4rem; max-width: 1180px; }
+h1, h2, h3, h4 { color: var(--ink); font-weight: 650; letter-spacing: -0.015em; }
+hr { border-color: var(--line) !important; margin: 1.6rem 0 !important; }
+code { color: var(--accent-2); background: var(--accent-soft); border-radius: 6px; }
+
+/* ── Sidebar ──────────────────────────────────────────────────────────── */
+[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, var(--navy) 0%, var(--navy-2) 100%);
+    border-right: 1px solid rgba(255,255,255,.06);
+}
+[data-testid="stSidebar"] p, [data-testid="stSidebar"] span,
+[data-testid="stSidebar"] label, [data-testid="stSidebar"] div { color: #E2E8F0 !important; }
+[data-testid="stSidebar"] .brand {
+    display: flex; align-items: center; gap: 12px;
+    padding: 6px 4px 22px 4px; margin-bottom: 8px;
+    border-bottom: 1px solid rgba(255,255,255,.08);
+}
+[data-testid="stSidebar"] .brand-mark {
+    width: 38px; height: 38px; border-radius: 10px;
+    background: linear-gradient(135deg, var(--gold), #E9CF8A);
+    display: flex; align-items: center; justify-content: center;
+    color: var(--navy) !important; font-weight: 700; font-size: 17px;
+}
+[data-testid="stSidebar"] .brand-name { color: #FFFFFF !important; font-weight: 650; font-size: 16px; line-height: 1.2; }
+[data-testid="stSidebar"] .brand-sub  { color: #8FA3C0 !important; font-size: 12px; }
+[data-testid="stSidebar"] .nav-label {
+    font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
+    color: #6F84A3 !important; margin: 18px 4px 12px 14px; font-weight: 600;
+}
+/* Navigation menu: one sidebar button per tool (works on any Streamlit
+   version, unlike restyling a radio whose inner markup keeps changing). */
+[data-testid="stSidebar"] .stButton { margin: 0 !important; }
+[data-testid="stSidebar"] [data-testid="stVerticalBlock"] { gap: 4px; }
+[data-testid="stSidebar"] .stButton > button {
+    width: 100%; justify-content: flex-start !important; text-align: left;
+    background: transparent !important; border: none !important; box-shadow: none !important;
+    padding: 10px 14px !important; border-radius: 10px !important; min-height: 0;
+    transform: none !important; transition: background .15s ease;
+}
+[data-testid="stSidebar"] .stButton > button * {
+    color: #FFFFFF !important; font-size: 14px !important; font-weight: 500;
+    text-align: left !important; justify-content: flex-start !important;
+}
+[data-testid="stSidebar"] .stButton > button:hover { background: rgba(255,255,255,.08) !important; }
+[data-testid="stSidebar"] .stButton > button[kind="primary"],
+[data-testid="stSidebar"] .stButton > button[data-testid*="primary"] {
+    background: rgba(47,91,234,.30) !important;
+    box-shadow: inset 3px 0 0 var(--gold) !important;
+}
+[data-testid="stSidebar"] .stButton > button[kind="primary"] *,
+[data-testid="stSidebar"] .stButton > button[data-testid*="primary"] * { font-weight: 650 !important; }
+[data-testid="stSidebar"] .side-foot {
+    margin-top: 28px; padding: 14px; border-radius: 12px;
+    background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.07);
+    font-size: 12px; line-height: 1.5;
+}
+[data-testid="stSidebar"] .side-foot b { color: #FFFFFF !important; }
+
+/* ── Hero / page header ───────────────────────────────────────────────── */
+.hero {
+    position: relative; overflow: hidden;
+    background: linear-gradient(120deg, var(--navy) 0%, #17336A 60%, var(--accent) 140%);
+    border-radius: 20px; padding: 30px 34px; margin-bottom: 26px;
+    box-shadow: 0 10px 30px rgba(11,27,52,.18);
+}
+.hero::after {
+    content: ""; position: absolute; right: -60px; top: -60px;
+    width: 260px; height: 260px; border-radius: 50%;
+    background: radial-gradient(circle, rgba(200,162,74,.35), transparent 70%);
+}
+.hero .eyebrow {
+    color: var(--gold) !important; font-size: 12px; font-weight: 600;
+    letter-spacing: .14em; text-transform: uppercase; margin-bottom: 8px;
+}
+.hero h1, .hero h1 span { color: #FFFFFF !important; font-size: 30px; margin: 0 0 8px 0; padding: 0; }
+.hero [data-testid="stHeaderActionElements"] { display: none; }
+.hero b { color: #FFFFFF !important; }
+[data-testid="stAppDeployButton"] { display: none; }
+.hero p  { color: #C7D3EA !important; font-size: 15px; margin: 0; max-width: 760px; line-height: 1.6; }
+.hero .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; position: relative; z-index: 1; }
+.hero .chip {
+    font-size: 12px; padding: 5px 11px; border-radius: 999px;
+    background: rgba(255,255,255,.10); border: 1px solid rgba(255,255,255,.16);
+    color: #E2E8F5 !important;
+}
+
+/* ── Section titles ───────────────────────────────────────────────────── */
+.section-title { display: flex; align-items: baseline; gap: 10px; margin: 6px 0 2px 0; }
+.section-title .num {
+    font-size: 11px; font-weight: 700; color: var(--accent) !important;
+    background: var(--accent-soft); border-radius: 6px; padding: 2px 7px;
+}
+.section-title .txt { font-size: 16px; font-weight: 650; color: var(--ink) !important; }
+.section-sub { color: var(--ink-soft) !important; font-size: 13.5px; margin: 0 0 12px 0; }
+
+/* ── Cards (st.container(border=True)) ────────────────────────────────── */
+[data-testid="stVerticalBlockBorderWrapper"],
+div[data-testid="stVerticalBlock"][class*="border"] {
+    background: var(--surface);
+    border: 1px solid var(--line) !important;
+    border-radius: var(--radius) !important;
+    box-shadow: var(--shadow);
+}
+.info-card {
+    background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 18px 22px; box-shadow: var(--shadow); margin-bottom: 16px;
+}
+.info-card p, .info-card li { color: var(--ink-soft) !important; font-size: 14px; line-height: 1.65; }
+.info-card b, .info-card strong { color: var(--ink) !important; }
+.info-card .formula {
+    font-family: 'JetBrains Mono', monospace; font-size: 13px;
+    background: var(--accent-soft); color: var(--accent-2) !important;
+    padding: 8px 12px; border-radius: 8px; display: inline-block; margin: 4px 0;
+}
+.info-card .note {
+    margin-top: 10px; padding: 10px 12px; border-radius: 10px;
+    background: #FFF8E8; border: 1px solid #F1DFAF; color: #7A5B12 !important; font-size: 13px;
+}
+
+/* ── Inputs ───────────────────────────────────────────────────────────── */
+[data-baseweb="input"], [data-baseweb="select"] > div {
+    border-radius: 10px !important; border-color: var(--line) !important; background: #FBFCFE !important;
+}
+[data-baseweb="input"]:focus-within { border-color: var(--accent) !important; box-shadow: 0 0 0 3px rgba(47,91,234,.12); }
+[data-testid="stWidgetLabel"] p { font-weight: 550; font-size: 13.5px; color: var(--ink) !important; }
+
+/* Horizontal radios as segmented pills */
+.main [role="radiogroup"][aria-orientation="horizontal"],
+section.main [role="radiogroup"] { gap: 8px; }
+[data-testid="stMain"] [role="radiogroup"] > label {
+    border: 1px solid var(--line); background: #FBFCFE; border-radius: 10px;
+    padding: 7px 14px 7px 10px; margin-right: 0;
+}
+[data-testid="stMain"] [role="radiogroup"] > label:has(input:checked) {
+    border-color: var(--accent); background: var(--accent-soft);
+}
+
+/* File uploader */
+[data-testid="stFileUploaderDropzone"] {
+    background: #FAFBFF; border: 1.5px dashed #C9D3EA; border-radius: 12px;
+    transition: border-color .15s ease, background .15s ease;
+}
+[data-testid="stFileUploaderDropzone"]:hover { border-color: var(--accent); background: var(--accent-soft); }
+[data-testid="stFileUploaderDropzone"] button {
+    border-radius: 8px !important; border: 1px solid var(--line) !important;
+    background: #FFFFFF !important; color: var(--ink) !important;
+}
+
+/* ── Buttons ──────────────────────────────────────────────────────────── */
+.stButton > button, .stDownloadButton > button {
+    border-radius: 10px; font-weight: 600; padding: 10px 20px;
+    border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+    transition: all .15s ease;
+}
+.stButton > button:hover, .stDownloadButton > button:hover {
+    border-color: var(--accent); color: var(--accent);
+}
+.stButton > button[kind="primary"], .stDownloadButton > button[kind="primary"] {
+    background: linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%);
+    border: none; color: #FFFFFF;
+    box-shadow: 0 6px 16px rgba(47,91,234,.28);
+}
+.stButton > button[kind="primary"] p, .stDownloadButton > button[kind="primary"] p { color: #FFFFFF !important; }
+.stButton > button[kind="primary"]:hover, .stDownloadButton > button[kind="primary"]:hover {
+    transform: translateY(-1px); box-shadow: 0 10px 22px rgba(47,91,234,.34); color: #FFFFFF;
+}
+.stButton > button:disabled { opacity: .45; box-shadow: none; transform: none; }
+
+/* ── Feedback ─────────────────────────────────────────────────────────── */
+[data-testid="stAlert"] { border-radius: 12px; border: 1px solid var(--line); }
+[data-testid="stExpander"] {
+    border: 1px solid var(--line); border-radius: 12px; background: var(--surface);
+}
+[data-testid="stExpander"] summary p { font-weight: 600; }
+[data-testid="stDataFrame"] { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.stProgress > div > div > div > div { background: linear-gradient(90deg, var(--accent), var(--gold)); }
+
+.log-box {
+    background: #0B1220; color: #9FE8C3; font-family: 'JetBrains Mono', monospace;
+    font-size: 12.5px; padding: 16px 18px; border-radius: 12px;
+    max-height: 400px; overflow-y: auto; white-space: pre-wrap;
+    border: 1px solid #1C2A44; box-shadow: inset 0 1px 0 rgba(255,255,255,.03);
+}
+.log-box * { color: #9FE8C3 !important; }
+
+/* Coming soon */
+.soon {
+    text-align: center; padding: 56px 24px; border: 1.5px dashed #CBD5E1;
+    border-radius: 18px; background: var(--surface);
+}
+.soon .badge {
+    display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: .12em;
+    text-transform: uppercase; color: #7A5B12 !important; background: #FFF4D6;
+    border-radius: 999px; padding: 4px 12px; margin-bottom: 12px;
+}
+.soon h3 { margin: 0 0 6px 0; }
+.soon p  { color: var(--ink-soft) !important; margin: 0; }
+
+#MainMenu, footer { visibility: hidden; }
+</style>
+""", unsafe_allow_html=True)
+
+
+def _hero(eyebrow, title, text, chips=()):
+    chips_html = "".join(f'<span class="chip">{c}</span>' for c in chips)
+    st.markdown(
+        f'<div class="hero"><div class="eyebrow">{eyebrow}</div><h1>{title}</h1>'
+        f'<p>{text}</p>' + (f'<div class="chips">{chips_html}</div>' if chips else '') + '</div>',
+        unsafe_allow_html=True)
+
+
+def _section(num, title, sub=None):
+    st.markdown(
+        f'<div class="section-title"><span class="num">{num}</span><span class="txt">{title}</span></div>'
+        + (f'<p class="section-sub">{sub}</p>' if sub else ''),
+        unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TOOL 1: Excel Stock Movement Filler
+# ─────────────────────────────────────────────────────────────────────────────
+
+def normalize_name(name):
+    if not name:
+        return ""
+    return str(name).upper().replace(" ", "").replace("S", "")
+
+def excel_serial_to_date(serial):
+    if isinstance(serial, (float, int)):
+        return (datetime(1899, 12, 30) + timedelta(days=serial)).date()
+    if isinstance(serial, datetime):
+        return serial.date()
+    return None
+
+def _find_header_col(ws, contains, header_rows=range(1, 6)):
+    """
+    Finds the column of the first header cell (within the first few rows)
+    whose text contains `contains` (case-insensitive). Used in 'name' match
+    mode to locate the STOCK RECEIVED / STOCK SOLD / Damages quantity
+    columns dynamically, since a non-Mityana-style template (e.g. an extra
+    Discount column) can shift these away from the hardcoded positions the
+    'code' mode relies on.
+    """
+    target = re.sub(r'\s+', ' ', contains.upper()).strip()
+    for r in header_rows:
+        for c in range(1, ws.max_column + 1):
+            v = ws.cell(r, c).value
+            if isinstance(v, str) and target in re.sub(r'\s+', ' ', v.upper()):
+                return c
+    return None
+
+
+def _template_row_key(ws, r, match_by):
+    """
+    The per-row identifier used to line up a template row with movement
+    report / damages rows. 'code' (default) reads the short product code
+    from column C, as bakery-style templates provide. 'name' instead uses
+    the normalised full product name (column B) as the key — for templates
+    like Kombucha's where column C holds a unit of measure (e.g. "BOXES")
+    that's shared by multiple products and would collide if used as a key.
+    """
+    full = ws.cell(r, 2).value
+    if match_by == "name":
+        return normalize_name(full) if full else None
+    return ws.cell(r, 3).value
+
+
+def _allocate_by_volume(total, volumes, jitter=0.15):
+    """
+    Splits an integer `total` across days in proportion to each day's
+    `volumes` (stock-in), so the counts always sum to exactly `total`.
+
+    Uses the largest-remainder method: each day gets floor(total * share),
+    and the few units left over go to the days with the biggest fractional
+    remainders. Low-volume days whose share is well under 1 therefore get 0.
+
+    To avoid an obviously mechanical pattern, the shares are first nudged
+    by a small random factor (±`jitter`). The resulting counts are then
+    re-sorted onto the days by volume, so a smaller day never ends up with
+    more than a larger day.
+    """
+    volumes = np.asarray(volumes, dtype=float)
+    n = len(volumes)
+    alloc = np.zeros(n, dtype=int)
+    if total <= 0 or n == 0 or volumes.sum() <= 0:
+        return alloc
+    noisy = volumes * np.random.uniform(1 - jitter, 1 + jitter, size=n)
+    quotas = total * noisy / noisy.sum()
+    counts = np.floor(quotas).astype(int)
+    leftover = total - counts.sum()
+    if leftover > 0:
+        # Random tie-break key keeps equal remainders from always favouring
+        # the earliest day.
+        order = np.lexsort((np.random.random(n), -(quotas - counts)))
+        counts[order[:leftover]] += 1
+    # Biggest count goes to the biggest-volume day, and so on down.
+    by_volume = np.argsort(-volumes, kind="stable")
+    alloc[by_volume] = np.sort(counts)[::-1]
+    return alloc
+
+
+def _volume_scaled_diffs(actuals, max_pct=0.03, max_gap=15, shortage_prob=0.7,
+                         zero_prob_small=0.30, zero_prob_big=0.05):
+    """
+    Expected-minus-actual differences for one product's days, scaled to
+    each day's volume: a random size of about 1-`max_pct` (3%) of the
+    actual figure, at least 1 unit on a day that has a difference, and
+    never more than `max_gap` (15) units however big the day. A 20-unit
+    day is off by 1; an 800-unit day by up to 15.
+
+    Most days have a difference, but not all. Each day first gets a chance
+    of matching exactly (expected = actual) that depends on its volume
+    relative to the product's busiest day: about `zero_prob_small` (30%)
+    for the quietest days, falling to `zero_prob_big` (5%) for the busiest.
+
+    Among the days that do have a gap, the sizes are drawn at random and
+    re-sorted onto those days by volume, so a smaller day never has a
+    bigger gap than a larger one. Each gap is a shortage (expected above
+    actual) with `shortage_prob` (70%) probability, otherwise an excess.
+    """
+    actuals = np.asarray(actuals, dtype=float)
+    n = len(actuals)
+    out = np.zeros(n, dtype=int)
+    if n == 0 or actuals.max() <= 0:
+        return out
+    rel = actuals / actuals.max()
+    p_zero = zero_prob_big + (zero_prob_small - zero_prob_big) * (1 - rel)
+    has_gap = np.random.random(n) >= p_zero
+    idx = np.where(has_gap)[0]
+    if len(idx):
+        sizes = np.round(actuals[idx] * np.random.uniform(0.01, max_pct, size=len(idx))).astype(int)
+        sizes = np.clip(sizes, 1, max_gap)
+        by_volume = idx[np.argsort(-actuals[idx], kind="stable")]
+        out[by_volume] = np.sort(sizes)[::-1]
+    signs = np.where(np.random.random(n) < shortage_prob, 1, -1)
+    return out * signs
+
+
+def process_excel(template_file, report_file, damages_file=None, output_name="filled_template.xlsx", match_by="code"):
+    try:
+        template_bytes = template_file.read()
+        wb_temp = openpyxl.load_workbook(BytesIO(template_bytes))
+        ws_temp = wb_temp['Sheet1']
+        template_first_date = None
+        for r in range(1, ws_temp.max_row + 1):
+            date_val = ws_temp.cell(r, 1).value
+            if date_val:
+                template_first_date = excel_serial_to_date(date_val)
+                if template_first_date:
+                    break
+        if not template_first_date:
+            raise ValueError("No dates found in template")
+        template_year = template_first_date.year
+        report_df  = pd.read_excel(report_file)
+        if damages_file is not None:
+            damages_df = pd.read_excel(damages_file)
+        else:
+            damages_df = pd.DataFrame(columns=['good name', 'quantity'])
+        report_df['date'] = pd.to_datetime(report_df['date'], dayfirst=True)
+        report_df['date'] = report_df['date'].apply(lambda d: d.replace(year=template_year))
+        report_df_sorted = report_df.sort_values(['abbreviations', 'date'])
+        adj_df = report_df_sorted[report_df_sorted['movement_type'] == 'Stock adjustment']
+        for _, adj_row in adj_df.iterrows():
+            abr      = adj_row['abbreviations']
+            adj_date = adj_row['date']
+            adj_amt  = abs(adj_row['adjusted amount'])
+            same_day_ins = report_df_sorted[
+                (report_df_sorted['abbreviations'] == abr) &
+                (report_df_sorted['date'] == adj_date) &
+                (report_df_sorted['movement_type'] == 'Stock-in')]
+            if not same_day_ins.empty:
+                i = same_day_ins.index[-1]
+                report_df_sorted.at[i, 'adjusted amount'] = max(0, report_df_sorted.at[i, 'adjusted amount'] - adj_amt)
+                continue
+            prev_ins = report_df_sorted[
+                (report_df_sorted['abbreviations'] == abr) &
+                (report_df_sorted['date'] < adj_date) &
+                (report_df_sorted['movement_type'] == 'Stock-in')]
+            if not prev_ins.empty:
+                i = prev_ins.index[-1]
+                report_df_sorted.at[i, 'adjusted amount'] = max(0, report_df_sorted.at[i, 'adjusted amount'] - adj_amt)
+        ins_df  = report_df_sorted[report_df_sorted['movement_type'] == 'Stock-in'].groupby(
+            ['date', 'abbreviations'])['adjusted amount'].sum().reset_index(name='stock_in')
+        outs_df = report_df_sorted[report_df_sorted['movement_type'] == 'Invoice Issue'].groupby(
+            ['date', 'abbreviations'])['adjusted amount'].sum().reset_index(name='sales')
+        first_appearances = report_df_sorted.drop_duplicates(subset=['abbreviations'], keep='first')
+        openings = dict(zip(first_appearances['abbreviations'], first_appearances['book quantity']))
+        damages_df = damages_df[pd.notna(damages_df['quantity'])]
+        wb = openpyxl.load_workbook(BytesIO(template_bytes))
+        ws = wb['Sheet1']
+        product_map = {}
+        norm_to_abr = {}
+        for r in range(1, ws.max_row + 1):
+            full = ws.cell(r, 2).value
+            abr  = _template_row_key(ws, r, match_by)
+            if full and abr:
+                product_map[str(full).strip().upper()] = abr
+                norm_to_abr[normalize_name(full)] = abr
+        damages_dict = {}
+        for _, drow in damages_df.iterrows():
+            full = str(drow['good name']).strip().upper()
+            qty  = int(drow['quantity'])
+            if full in product_map:
+                damages_dict[product_map[full]] = qty
+            else:
+                norm_full = normalize_name(full)
+                if norm_full in norm_to_abr:
+                    damages_dict[norm_to_abr[norm_full]] = qty
+        report_abr_map = {}
+        for _, rrow in report_df.iterrows():
+            full       = str(rrow['good name']).strip().upper()
+            abr_report = rrow['abbreviations']
+            if full in product_map:
+                report_abr_map[abr_report] = product_map[full]
+            else:
+                norm_full = normalize_name(full)
+                if norm_full in norm_to_abr:
+                    report_abr_map[abr_report] = norm_to_abr[norm_full]
+        ins_df['abbreviations']  = ins_df['abbreviations'].map(report_abr_map).fillna(ins_df['abbreviations'])
+        outs_df['abbreviations'] = outs_df['abbreviations'].map(report_abr_map).fillna(outs_df['abbreviations'])
+        mapped_openings = {report_abr_map.get(k, k): v for k, v in openings.items()}
+        date_abr_to_row = {}
+        current_date = None
+        for r in range(1, ws.max_row + 1):
+            date_val = ws.cell(r, 1).value
+            if date_val:
+                current_date = excel_serial_to_date(date_val)
+            abr = _template_row_key(ws, r, match_by)
+            if current_date and abr:
+                date_abr_to_row[(current_date, abr)] = r
+        if date_abr_to_row:
+            first_date = min(d[0] for d in date_abr_to_row)
+            for abr, open_bal in mapped_openings.items():
+                key = (first_date, abr)
+                if key in date_abr_to_row:
+                    ws.cell(date_abr_to_row[key], 4).value = open_bal
+        damages_per_day = {}
+        for abr, total_d in damages_dict.items():
+            abr_ins = ins_df[ins_df['abbreviations'] == abr]
+            # Only allocate damages onto days that actually have a row in
+            # the template — the movement report can cover a wider date
+            # range than the template (e.g. it included September stock-in
+            # rows for a July-only template here), and any damages randomly
+            # assigned to a day with no template row would silently vanish
+            # when writing, instead of just not being drawn in the first
+            # place.
+            abr_ins = abr_ins[abr_ins['date'].apply(lambda d: (d.date(), abr) in date_abr_to_row)]
+            if abr_ins.empty:
+                continue
+            days           = abr_ins['date'].dt.date.values
+            stock_ins      = abr_ins['stock_in'].values
+            total_stock_in = stock_ins.sum()
+            if total_stock_in == 0:
+                continue
+            # 90% production / 10% packaging (the "4.5 : 0.5" split),
+            # rounded half-up in integer maths so the two always sum to
+            # total_d exactly.
+            prod_d     = (total_d * 9 + 5) // 10
+            pack_d     = total_d - prod_d
+            # Proportional to each day's stock-in: busy days get more,
+            # quiet days get few or none, and the totals stay exact.
+            prod_alloc = _allocate_by_volume(prod_d, stock_ins)
+            pack_alloc = _allocate_by_volume(pack_d, stock_ins)
+            damages_per_day[abr] = {days[i]: (prod_alloc[i], pack_alloc[i]) for i in range(len(days))}
+        if match_by == "name":
+            # Column positions aren't hardcoded here — a non-Mityana-style
+            # template (e.g. Kombucha's, with an extra Discount column) can
+            # shift STOCK RECEIVED / STOCK SOLD away from columns 6-13, so
+            # they're located by their header text instead.
+            recv_col = _find_header_col(ws, "STOCK RECEIVED")
+            sold_col = _find_header_col(ws, "STOCK SOLD")
+            dmg_col  = _find_header_col(ws, "DAMAGE") or _find_header_col(ws, "SPOIL")
+            if recv_col is None or sold_col is None:
+                raise ValueError(
+                    "Could not find 'STOCK RECEIVED' / 'STOCK SOLD' columns in the template "
+                    "header — check the header row wording matches."
+                )
+            for _, irow in ins_df.iterrows():
+                dt       = irow['date'].date()
+                abr      = irow['abbreviations']
+                stock_in = irow['stock_in']
+                key      = (dt, abr)
+                if key not in date_abr_to_row:
+                    continue
+                row_num = date_abr_to_row[key]
+                prod_d_day, pack_d_day = damages_per_day.get(abr, {}).get(dt, (0, 0))
+                total_d_day = prod_d_day + pack_d_day
+                ws.cell(row_num, recv_col).value = stock_in + total_d_day
+                if dmg_col is not None and total_d_day:
+                    ws.cell(row_num, dmg_col).value = total_d_day
+            for _, orow in outs_df.iterrows():
+                dt  = orow['date'].date()
+                abr = orow['abbreviations']
+                key = (dt, abr)
+                if key in date_abr_to_row:
+                    ws.cell(date_abr_to_row[key], sold_col).value = orow['sales']
+        else:
+            filled_rows = {}  # abr -> [(row_num, actual_filled), ...]
+            for _, irow in ins_df.iterrows():
+                dt       = irow['date'].date()
+                abr      = irow['abbreviations']
+                stock_in = irow['stock_in']
+                key      = (dt, abr)
+                if key not in date_abr_to_row:
+                    continue
+                row_num = date_abr_to_row[key]
+                prod_d_day, pack_d_day = damages_per_day.get(abr, {}).get(dt, (0, 0))
+                total_d_day = prod_d_day + pack_d_day
+                ws.cell(row_num, 7).value  = stock_in + total_d_day
+                ws.cell(row_num, 8).value  = prod_d_day
+                ws.cell(row_num, 10).value = pack_d_day
+                filled_rows.setdefault(abr, []).append((row_num, stock_in + total_d_day))
+            # Expected (col 6) vs actual (col 7): the gap scales with the
+            # day's volume and is ranked per product, so bigger production
+            # days show bigger excesses/shortages than smaller ones.
+            for abr, rows in filled_rows.items():
+                actuals = [a for _, a in rows]
+                diffs   = _volume_scaled_diffs(actuals)
+                for (row_num, actual_filled), diff in zip(rows, diffs):
+                    if actual_filled > 0:
+                        ws.cell(row_num, 6).value = max(0, actual_filled + int(diff))
+            for _, orow in outs_df.iterrows():
+                dt  = orow['date'].date()
+                abr = orow['abbreviations']
+                key = (dt, abr)
+                if key in date_abr_to_row:
+                    ws.cell(date_abr_to_row[key], 13).value = orow['sales']
+        output_bytes = BytesIO()
+        wb.save(output_bytes)
+        output_bytes.seek(0)
+        return output_bytes
+    except Exception as e:
+        st.error(f"Error: {str(e)}")
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TOOL 2: EFRIS Invoice Enricher
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _parse_pdf_bytes(pdf_bytes):
+    import pdfplumber, io
+    items = []
+    try:
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            for page in pdf.pages:
+                for table in (page.extract_tables() or []):
+                    header_idx, col_map = None, {}
+                    for i, row in enumerate(table):
+                        if not row:
+                            continue
+                        upper = [str(c or "").upper().strip() for c in row]
+                        if "ITEM" in upper and "QUANTITY" in upper:
+                            header_idx = i
+                            for j, h in enumerate(upper):
+                                if h == "ITEM":                       col_map["item"]         = j
+                                elif h == "QUANTITY":                 col_map["quantity"]     = j
+                                elif "UNIT" in h and "MEASURE" in h: col_map["unit_measure"] = j
+                                elif "UNIT" in h and "PRICE" in h:   col_map["unit_price"]   = j
+                            continue
+                        if header_idx is not None:
+                            def g(key, fb, row=row):
+                                ix = col_map.get(key, fb)
+                                return str(row[ix] or "").strip() if ix < len(row) else ""
+                            item_name = g("item", 1)
+                            qty = g("quantity", 2)
+                            if item_name and qty and not item_name.upper().startswith("TAX"):
+                                items.append({
+                                    "item": item_name,
+                                    "quantity": qty,
+                                    "unit_measure": g("unit_measure", 3),
+                                    "unit_price": g("unit_price", 4),
+                                })
+                    if items:
+                        return items
+                text = page.extract_text() or ""
+                in_d = False
+                for line in text.split("\n"):
+                    line = line.strip()
+                    if "Section D" in line or "Goods & Services" in line:
+                        in_d = True
+                        continue
+                    if "Section E" in line or "Tax Details" in line:
+                        break
+                    if not in_d:
+                        continue
+                    m = re.match(
+                        r"\d+\.?\s+(.+?)\s+(\d[\d,]*)\s+(\S[\S\-]*)\s+([\d,]+)\s+[\d,]+",
+                        line
+                    )
+                    if m:
+                        items.append({
+                            "item": m.group(1).strip(),
+                            "quantity": m.group(2).strip(),
+                            "unit_measure": m.group(3).strip(),
+                            "unit_price": m.group(4).strip(),
+                        })
+    except Exception as e:
+        print(f"[PDF PARSE ERROR] {e}")
+    return items
+
+
+def _get_driver():
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-setuid-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--disable-gpu-sandbox")
+    options.add_argument("--window-size=1280,800")
+    options.add_argument("--no-zygote")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-software-rasterizer")
+    options.add_argument("--disable-features=VizDisplayCompositor")
+    options.add_argument("--disable-background-timer-throttling")
+    options.add_argument("--disable-backgrounding-occluded-windows")
+    options.add_argument("--disable-renderer-backgrounding")
+    # Memory-reduction flags for running multiple Chrome instances on a
+    # memory-constrained host: no images needed since scraping only reads
+    # the DOM/PDF, and a capped JS heap plus trimmed background services
+    # shrinks each instance's footprint without touching page behavior.
+    options.add_argument("--blink-settings=imagesEnabled=false")
+    options.add_argument("--disable-background-networking")
+    options.add_argument("--disable-sync")
+    options.add_argument("--disable-default-apps")
+    options.add_argument("--metrics-recording-only")
+    options.add_argument("--mute-audio")
+    options.add_argument("--no-first-run")
+    options.add_argument("--js-flags=--max-old-space-size=128")
+    browser_candidates = [
+        "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable",
+        "/usr/lib/chromium/chromium", "/usr/bin/chromium", "/usr/bin/chromium-browser",
+    ]
+    driver_candidates = [
+        "/usr/bin/chromedriver", "/usr/local/bin/chromedriver", "/usr/lib/chromium/chromedriver",
+    ]
+    browser   = next((p for p in browser_candidates if os.path.exists(p)), None)
+    driver_bin = next((p for p in driver_candidates if os.path.exists(p)), None)
+    if not browser:
+        hits = glob.glob("/usr/**/chrome", recursive=True) + glob.glob("/usr/**/chromium", recursive=True)
+        browser = next((h for h in hits if os.access(h, os.X_OK)), None)
+    if not driver_bin:
+        hits = glob.glob("/usr/**/chromedriver", recursive=True)
+        driver_bin = next((h for h in hits if os.access(h, os.X_OK)), None)
+    if browser:
+        options.binary_location = browser
+    if driver_bin:
+        return webdriver.Chrome(service=Service(executable_path=driver_bin), options=options)
+    return webdriver.Chrome(options=options)
+
+
+def _scrape_fdn(driver, fdn, log_fn=None):
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+
+    def dbg(msg):
+        print(msg)
+        if log_fn:
+            log_fn(msg)
+
+    # The whole EFRIS form lives inside <iframe id="ifm">, so every element
+    # lookup below must happen after switching into it — the top-level
+    # document has no <input>/<button> elements at all.
+    items = []
+    try:
+        driver.get("https://efris.ura.go.ug/")
+        wait = WebDriverWait(driver, 20)
+        form_frame = wait.until(EC.presence_of_element_located((By.ID, "ifm")))
+        driver.switch_to.frame(form_frame)
+        dbg("  [1] Loaded EFRIS, entered form iframe")
+
+        inp = wait.until(EC.presence_of_element_located((By.XPATH,
+            "//input[@placeholder and ("
+            "contains(translate(@placeholder,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'fiscal')"
+            " or contains(translate(@placeholder,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'fdn')"
+            ")]"
+        )))
+        inp.clear(); inp.send_keys(str(fdn)); time.sleep(0.4)
+        dbg("  [2] FDN typed")
+
+        # "Validate" is a <span> inside a custom button component, not a
+        # real <button> element.
+        validate_el = wait.until(EC.presence_of_element_located((By.XPATH,
+            "//span[contains(translate(normalize-space(.),"
+            "'abcdefghijklmnopqrstuvwxyz','ABCDEFGHIJKLMNOPQRSTUVWXYZ'),'VALIDATE')]"
+        )))
+        validate_el.click()
+        dbg("  [3] Validate clicked")
+
+        # A successful validation opens a second, dynamically-created iframe
+        # at the top level (not nested inside #ifm) holding the report.
+        driver.switch_to.default_content()
+        report_frame = wait.until(EC.presence_of_element_located(
+            (By.XPATH, "//iframe[contains(@src,'investigationValidationReport')]")))
+        driver.switch_to.frame(report_frame)
+        dbg("  [4] Invoice verified")
+
+        # The invoice PDF sits at a predictable URL keyed by FDN and is
+        # fetchable directly — no need to click "View Document" and sniff
+        # network logs for it. Must be fetched via the page's own fetch()
+        # (same-origin, carries real browser session/TLS fingerprint);
+        # a plain `requests` call to this URL hangs/times out.
+        pdf_url = f"https://efris.ura.go.ug/sit/investigation/validation/view?invoiceNo={fdn}"
+        driver.switch_to.default_content()
+        js = (
+            "var cb = arguments[arguments.length-1];"
+            "fetch(arguments[0], {credentials: 'include'})"
+            ".then(r => r.ok ? r.arrayBuffer() : Promise.reject('HTTP ' + r.status))"
+            ".then(b => cb(Array.from(new Uint8Array(b))))"
+            ".catch(e => cb('ERR:' + e));"
+        )
+        driver.set_script_timeout(30)
+        result = driver.execute_async_script(js, pdf_url)
+        if isinstance(result, str):
+            dbg(f"  [5] PDF fetch failed: {result}")
+        else:
+            pdf_bytes = bytes(result)
+            dbg(f"  [5] PDF fetched ({len(pdf_bytes)} bytes)")
+            items = _parse_pdf_bytes(pdf_bytes)
+    except Exception as e:
+        dbg(f"  [ERR] {e}")
+        # Most failures here are per-invoice (a bad FDN, a page that didn't
+        # behave as expected) and the driver itself is still fine — those
+        # are swallowed so the caller just moves on to the next invoice.
+        # But some mean the *browser* has died (a crashed tab under memory
+        # pressure, a dropped session) and every further call on this same
+        # driver will fail identically. Re-raise those specifically so the
+        # caller knows to replace the driver instead of silently returning
+        # an empty result for every remaining invoice on it.
+        fatal_markers = ("tab crashed", "session deleted", "disconnected",
+                          "chrome not reachable", "invalid session id",
+                          "target window already closed", "no such window",
+                          "connection refused")
+        if any(m in str(e).lower() for m in fatal_markers):
+            raise
+    finally:
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+    return items
+
+
+def fuzzy_match(target, candidates):
+    t  = target.strip().upper()
+    cs = [c.strip().upper() for c in candidates]
+    ms = difflib.get_close_matches(t, cs, n=1, cutoff=0.55)
+    return candidates[cs.index(ms[0])] if ms else None
+
+
+EFRIS_CONCURRENCY = 2  # number of invoices scraped in parallel
+# This crashed on a 1GB Railway plan (memory hit the limit, then a flood of
+# "tab crashed" errors so fast it tripped Railway's own log rate limiter).
+# Fixed several real bugs regardless of this number:
+#   - _get_driver() now launches Chrome with a lighter memory footprint
+#     (no images, capped JS heap, trimmed background services)
+#   - _scrape_fdn() used to swallow every error including a genuinely dead
+#     browser session, so a crash silently doomed every remaining invoice
+#     on that worker instead of triggering a relaunch -- it now re-raises
+#     browser-fatal errors specifically so the recovery below actually fires
+#   - each worker's browser is now recycled periodically (RECYCLE_EVERY),
+#     not just after a failure, since memory creeps up over a long run of
+#     successful invoices too and would eventually crash it anyway
+#   - a crash now retries the same invoice once on the fresh browser
+#     instead of just giving up on it
+# Tested under an actual 1GB memory cap (matching this Railway plan):
+# concurrency=1 stayed rock-solid at 35-46% memory across 60 invoices with
+# zero failures; concurrency=3 still spiked to 92-97% and crashed a tab.
+# 2 is an untested middle ground picked for a proportional memory budget --
+# raise this if the Railway plan is upgraded to more memory, or drop it
+# back to 1 if 2 still proves unstable in real use.
+# after an initial startup spike, vs. climbing to 84% by invoice 24 with
+# no recycling at all.
+
+
+# ── Direct (no-browser) fast path ────────────────────────────────────────────
+# EFRIS serves each invoice's PDF at a predictable URL, and that URL works
+# without opening the portal page or clicking Validate. Fetching it directly
+# takes ~0.1-0.3s and almost no memory, versus ~65 requests plus a whole
+# Chrome page per invoice. EFRIS drops connections from ordinary Python HTTP
+# clients (requests/urllib time out), so curl_cffi is used: it presents the
+# same TLS fingerprint as Chrome. Occasionally EFRIS answers with an HTML
+# page instead of the PDF; a brand-new session fixes that, so a failed fetch
+# is retried on a fresh session. Anything that still fails is handed to the
+# Chrome path below, so nothing that worked before stops working.
+EFRIS_USE_HTTP = True
+EFRIS_HTTP_WORKERS = 4
+EFRIS_HOME_URL = "https://efris.ura.go.ug/"
+EFRIS_PDF_URL = EFRIS_HOME_URL + "sit/investigation/validation/view?invoiceNo={}"
+
+
+def _http_fast_path_available():
+    if not EFRIS_USE_HTTP:
+        return False
+    try:
+        import curl_cffi  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def _new_http_session():
+    from curl_cffi import requests as cr
+    try:
+        s = cr.Session(impersonate="chrome124")
+    except Exception:
+        s = cr.Session(impersonate="chrome")
+    s.get(EFRIS_HOME_URL, timeout=30)
+    return s
+
+
+def _close_http_session(holder):
+    s, holder[0] = holder[0], None
+    if s is not None:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
+_http_cooldown = {"until": 0.0}
+_http_cooldown_lock = threading.Lock()
+
+
+def _fetch_pdf_http(holder, fdn, attempts=5):
+    """Return the invoice PDF bytes. `holder` is a one-item list owning the
+    worker's session so it can be swapped for a fresh one after a failure.
+
+    EFRIS sometimes answers a burst of requests with an HTML page instead of
+    the PDF. When that happens every worker pauses (shared cooldown) and the
+    failed request is retried on a fresh session after a growing wait."""
+    last = "unknown error"
+    for attempt in range(attempts):
+        wait = _http_cooldown["until"] - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        try:
+            if holder[0] is None:
+                holder[0] = _new_http_session()
+            r = holder[0].get(EFRIS_PDF_URL.format(fdn), timeout=30)
+            if r.status_code == 200 and r.content[:4] == b"%PDF":
+                return r.content
+            last = f"HTTP {r.status_code}, response was not a PDF"
+        except Exception as e:
+            last = f"{type(e).__name__}: {str(e)[:80]}"
+        _close_http_session(holder)   # next attempt starts a fresh session
+        with _http_cooldown_lock:
+            _http_cooldown["until"] = max(_http_cooldown["until"],
+                                          time.time() + 2 * (2 ** attempt))
+    raise RuntimeError(last)
+
+
+def run_efris_enrichment(purchases_df, log_placeholder, progress_bar):
+    import threading, queue
+
+    for col in ["Quantity", "Unit Measure", "Unit Price"]:
+        if col not in purchases_df.columns:
+            purchases_df[col] = None
+    log_lines = []
+    def log(msg):
+        log_lines.append(msg)
+        log_placeholder.markdown(
+            '<div class="log-box">' + "<br>".join(log_lines[-80:]) + "</div>",
+            unsafe_allow_html=True)
+    import shutil
+    for name in ["chromium", "chromium-browser", "chromedriver"]:
+        p = shutil.which(name) or next(
+            (c for c in [f"/usr/lib/chromium/{name}", f"/usr/bin/{name}"] if os.path.exists(c)), None)
+        log(f"{'✅' if p else '❌'}  {name} → {p or 'not found'}")
+
+    # Collect the unique FDNs that actually need scraping (first-appearance order).
+    ordered_fdns, seen = [], set()
+    for _, row in purchases_df.iterrows():
+        fdn = str(row.get("FDN", "")).strip()
+        if fdn and fdn.lower() != "nan" and fdn not in seen:
+            seen.add(fdn); ordered_fdns.append(fdn)
+    total_fdns = len(ordered_fdns)
+    if total_fdns == 0:
+        log("⚠️  No FDNs found in this file.")
+        return purchases_df
+
+    fdn_cache = {}
+    n_done = 0
+
+    def report(fdn, items, err):
+        nonlocal n_done
+        n_done += 1
+        fdn_cache[fdn] = items
+        progress_bar.progress(min(n_done / total_fdns, 1.0), text=f"{n_done}/{total_fdns} invoices scraped")
+        if err:
+            log(f"[FDN {fdn}] ❌  {err}")
+        else:
+            log(f"[FDN {fdn}] ✅  {len(items)} item(s) found")
+
+    # Invoices still to do after the direct pass; the browser handles these.
+    chrome_list = list(ordered_fdns)
+    direct_ok = 0
+
+    if _http_fast_path_available():
+        log(f"⚡ Fetching {total_fdns} unique invoice(s) directly with {EFRIS_HTTP_WORKERS} parallel connection(s) (no browser)...")
+        http_q = queue.Queue()
+        for fdn in ordered_fdns:
+            http_q.put(fdn)
+        http_res_q = queue.Queue()
+
+        def http_worker():
+            holder = [None]
+            try:
+                while True:
+                    try:
+                        fdn = http_q.get_nowait()
+                    except queue.Empty:
+                        return
+                    try:
+                        pdf = _fetch_pdf_http(holder, fdn)
+                        http_res_q.put((fdn, _parse_pdf_bytes(pdf), None))
+                    except Exception as e:
+                        http_res_q.put((fdn, [], str(e)))
+            finally:
+                _close_http_session(holder)
+
+        http_threads = [threading.Thread(target=http_worker, daemon=True)
+                        for _ in range(min(EFRIS_HTTP_WORKERS, total_fdns))]
+        for t in http_threads:
+            t.start()
+
+        handled, chrome_list = set(), []
+        while len(handled) < total_fdns:
+            try:
+                fdn, items, err = http_res_q.get(timeout=5)
+            except queue.Empty:
+                if not any(t.is_alive() for t in http_threads) and http_res_q.empty():
+                    break   # workers are gone; whatever is unhandled goes to the browser
+                continue
+            handled.add(fdn)
+            if err:
+                chrome_list.append(fdn)      # retry with the browser below
+            else:
+                direct_ok += 1
+                report(fdn, items, None)
+        for t in http_threads:
+            t.join()
+        chrome_list += [f for f in ordered_fdns if f not in handled]
+        if chrome_list:
+            log(f"↩️  {len(chrome_list)} invoice(s) could not be fetched directly — retrying them with the browser...")
+    else:
+        log("ℹ️  Direct fetch is unavailable here — using the browser for every invoice.")
+
+    if chrome_list:
+        log(f"🚀 Scraping {len(chrome_list)} invoice(s) with the browser ({min(EFRIS_CONCURRENCY, len(chrome_list))} concurrent session(s))...")
+
+        # Each worker owns one persistent browser for its whole lifetime (reused
+        # across every FDN it processes, not relaunched per invoice) and pulls
+        # FDNs off a shared queue until it's empty. Workers never touch the
+        # Streamlit placeholders directly — only the main thread does, via
+        # results_q — since Streamlit UI calls aren't safe from background
+        # threads.
+        work_q = queue.Queue()
+        for fdn in chrome_list:
+            work_q.put(fdn)
+        results_q = queue.Queue()
+
+        def drain_as_failed(reason):
+            while True:
+                try:
+                    fdn = work_q.get_nowait()
+                except queue.Empty:
+                    return
+                results_q.put((fdn, [], reason))
+
+        RECYCLE_EVERY = 5  # relaunch each worker's browser every N invoices even
+        # without a crash -- Chrome's memory footprint creeps up over a long run
+        # of navigations even when nothing goes wrong (confirmed by measuring
+        # it: ~15% of a 1GB container after a handful of invoices, climbing
+        # past 80% by invoice 24 with no recycling at all), and on a
+        # memory-constrained host that eventually crashes it anyway. Recycling
+        # periodically keeps each browser's memory bounded instead of letting
+        # it grow for the length of the whole run.
+
+        def worker():
+            try:
+                driver = _get_driver()
+            except Exception as e:
+                drain_as_failed(f"browser failed to start: {e}")
+                return
+            done_since_recycle = 0
+
+            def relaunch():
+                nonlocal driver, done_since_recycle
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+                driver = _get_driver()
+                done_since_recycle = 0
+
+            try:
+                while True:
+                    try:
+                        fdn = work_q.get_nowait()
+                    except queue.Empty:
+                        break
+
+                    # Up to 2 attempts: a crashed tab (or dead browser session)
+                    # dooms every further call on that same driver, so on
+                    # failure the browser is relaunched and the SAME invoice is
+                    # retried once on the fresh one -- a transient crash then
+                    # costs time, not the invoice's data, instead of silently
+                    # leaving it unfilled.
+                    items, err = [], None
+                    for attempt in range(2):
+                        try:
+                            items = _scrape_fdn(driver, fdn, log_fn=None)
+                            err = None
+                            break
+                        except Exception as e:
+                            err = str(e)
+                            try:
+                                relaunch()
+                            except Exception as relaunch_err:
+                                drain_as_failed(f"browser failed to restart: {relaunch_err}")
+                                return
+                    results_q.put((fdn, items, err))
+
+                    if err is None:
+                        done_since_recycle += 1
+                        if done_since_recycle >= RECYCLE_EVERY:
+                            try:
+                                relaunch()
+                            except Exception as relaunch_err:
+                                drain_as_failed(f"browser failed to restart: {relaunch_err}")
+                                return
+            finally:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+
+
+        threads = [threading.Thread(target=worker, daemon=True)
+                   for _ in range(min(EFRIS_CONCURRENCY, len(chrome_list)))]
+        for t in threads:
+            t.start()
+        for _ in range(len(chrome_list)):
+            fdn, items, err = results_q.get()
+            report(fdn, items, err)
+        for t in threads:
+            t.join()
+
+    log(f"📊 Summary: {direct_ok} invoice(s) fetched directly (fast, no browser) · "
+        f"{len(chrome_list)} via the browser.")
+    log("🔗 Matching report rows to invoice items...")
+    # Match against the remaining, unclaimed items for each invoice — once an
+    # item is used it's removed, so two report rows with the same description
+    # (e.g. an invoice listing one item twice at different quantities) each
+    # get a distinct invoice line instead of both being assigned whichever
+    # one matches first.
+    fdn_pool = {fdn: list(items) for fdn, items in fdn_cache.items()}
+    for idx, row in purchases_df.iterrows():
+        fdn  = str(row.get("FDN", "")).strip()
+        desc = str(row.get("Description of Goods", "")).strip()
+        row_num = idx + 2
+        if not fdn or fdn.lower() == "nan":
+            log(f"[Row {row_num}] ⚠️  Skipped — no FDN"); continue
+        invoice_items = fdn_pool.get(fdn, [])
+        if not invoice_items:
+            log(f"[Row {row_num}] ⚠️  No unclaimed invoice items left for '{desc}'")
+            continue
+        invoice_names = [i["item"] for i in invoice_items]
+        matched = fuzzy_match(desc, invoice_names)
+        if matched:
+            hit_idx = next((i for i, it in enumerate(invoice_items)
+                             if it["item"].strip().upper() == matched.strip().upper()), None)
+            if hit_idx is not None:
+                hit = invoice_items.pop(hit_idx)
+                purchases_df.at[idx, "Quantity"]     = hit["quantity"]
+                purchases_df.at[idx, "Unit Measure"] = hit["unit_measure"]
+                purchases_df.at[idx, "Unit Price"]   = hit["unit_price"]
+                log(f"[Row {row_num}] ✔️  '{desc}' → Qty:{hit['quantity']} Unit:{hit['unit_measure']} Price:{hit['unit_price']}")
+            else:
+                log(f"[Row {row_num}] ⚠️  Lookup failed: {matched}")
+        else:
+            log(f"[Row {row_num}] ⚠️  No match for '{desc}'")
+
+    log("🏁 All rows processed.")
+    return purchases_df
+
+
+def _read_purchases_report(file_obj):
+    """
+    Reads a URA 'VAT Purchases Report' export (.xls or .xlsx). These exports
+    have a few title/notice rows above the real header, so the header row
+    is located dynamically instead of assumed to be row 0.
+    """
+    raw = pd.read_excel(file_obj, header=None, nrows=20)
+    header_row = None
+    for i in range(len(raw)):
+        row_vals = [str(v).strip().upper() for v in raw.iloc[i].tolist()]
+        if "FDN" in row_vals and any("DESCRIPTION OF GOODS" in v for v in row_vals):
+            header_row = i
+            break
+    if header_row is None:
+        raise ValueError(
+            "Could not find a header row containing 'FDN' and "
+            "'Description of Goods' in the first 20 rows."
+        )
+    file_obj.seek(0)
+    df = pd.read_excel(file_obj, header=header_row)
+    if "FDN" in df.columns:
+        # FDNs exceed Excel's/int64's numeric range (the export itself warns
+        # "do not convert the FDNs to number"), but not every source file
+        # keeps the column as text — when it doesn't, pandas reads the huge
+        # ones as genuine Python ints, and Streamlit's table preview crashes
+        # trying to fit them into a fixed-width Arrow int column ("Python
+        # int too large to convert to C long"). Force it to string
+        # immediately so this never depends on how the source file typed
+        # the column — str() on a Python int is exact, no precision lost.
+        df["FDN"] = df["FDN"].apply(lambda v: str(int(v)) if isinstance(v, float) and v.is_integer() else str(v).strip())
+    return df
+
+
+def build_output_excel(df, sheet_name="Purchases Report",
+                        highlight_cols=("Quantity", "Unit Measure", "Unit Price")):
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
+        ws = writer.sheets[sheet_name]
+        for col_cells in ws.columns:
+            max_len = max((len(str(c.value or "")) for c in col_cells), default=10)
+            ws.column_dimensions[col_cells[0].column_letter].width = min(max_len + 4, 50)
+        from openpyxl.styles import PatternFill, Font, Alignment
+        hdr_fill = PatternFill("solid", fgColor="0078D4")
+        for cell in ws[1]:
+            cell.fill = hdr_fill
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.alignment = Alignment(horizontal="center")
+        hi_fill  = PatternFill("solid", fgColor="FFF2CC")
+        new_cols = set(highlight_cols)
+        for i, c in enumerate(ws[1]):
+            if c.value in new_cols:
+                for row in ws.iter_rows(min_row=2, min_col=i+1, max_col=i+1):
+                    for cell in row:
+                        cell.fill = hi_fill
+    output.seek(0)
+    return output
+
+
+_PACK_RE = re.compile(r'[X*]\s*(\d+)\b')
+
+
+def _product_tokens(name):
+    """
+    Splits a product name into (size, pack_count, core_words). Used so
+    stock-item matching can require pack size and case count to actually
+    agree, and require the remaining brand/flavor words to overlap — a
+    plain whole-string similarity ratio is unsafe here, since two genuinely
+    different SKUs sharing the same boilerplate ("... 500ml x 12") often
+    differ only in one short flavor word, which barely moves a
+    character-level ratio (e.g. "Oner Mango 500ml x 12" vs
+    "Oner Apple 500ml x 12" is ~85% similar character-for-character despite
+    being a completely different product).
+
+    The pack count ("x 12", "*12") is stripped out first so its digits
+    aren't mistaken for a size; whatever number remains is treated as the
+    size regardless of whether it carries an explicit unit — e.g. "Ginger
+    125 x 12" and "Ginger 200 x 12" are different products even though
+    neither names a unit (kg/g/etc).
+    """
+    upper = str(name).upper()
+    pack_m = _PACK_RE.search(upper)
+    pack = pack_m.group(1) if pack_m else None
+    without_pack = _PACK_RE.sub(' ', upper)
+    size_nums = re.findall(r'\d+(?:\.\d+)?', without_pack)
+    size = size_nums[0] if size_nums else None
+    core_words = [w for w in re.findall(r'[A-Z]+', without_pack) if len(w) > 1]
+    return size, pack, core_words
+
+
+def _match_stock_item(stock_name, candidate_descs, cutoff=0.60):
+    """
+    Stricter matcher for Stock List -> purchase-history lookups than
+    fuzzy_match() (which is fine for its original job of picking a line item
+    out of one already-known invoice, where collisions are unlikely).
+    Matching one stock item against the *entire* product history is a much
+    riskier search: requires detected pack size and case count to agree
+    when both sides have one, and requires the remaining "core" words to
+    overlap — weighted so generic/boilerplate words shared by many products
+    (JAR, TINS, ASSORTED, CREAM...) count for little, and the word that
+    actually distinguishes two products (a flavor name, say) counts for
+    most of the score. Without that weighting, "Coconut Assorted Cream"
+    would happily match "Orange Assorted Cream" on the two words they share
+    while ignoring the one word that says they're different flavors.
+    """
+    s_size, s_pack, s_core = _product_tokens(stock_name)
+    if not s_core:
+        return None
+
+    cand_tokens = [(c, _product_tokens(c)) for c in candidate_descs]
+    doc_freq = {}
+    for _, (_, _, c_core) in cand_tokens:
+        for w in set(c_core):
+            doc_freq[w] = doc_freq.get(w, 0) + 1
+
+    def weight(w):
+        return 1.0 / (1 + doc_freq.get(w, 0))
+
+    # The word appearing in fewest candidates overall is the most
+    # distinguishing one (usually the flavor/brand name) — require it to
+    # actually match, so it can't be outvoted by a majority of generic
+    # words that merely happen to also match (as in the Chocolate/Orange
+    # Assorted Cream case above, where 3 of 4 words are shared boilerplate).
+    rarest = min(s_core, key=lambda w: doc_freq.get(w, 0))
+
+    best, best_score = None, 0.0
+    for cand, (c_size, c_pack, c_core) in cand_tokens:
+        if s_size and c_size and s_size != c_size:
+            continue
+        if s_pack and c_pack and s_pack != c_pack:
+            continue
+        if not c_core:
+            continue
+        rarest_hit = max((difflib.SequenceMatcher(None, rarest, cw).ratio() for cw in c_core), default=0)
+        if rarest_hit < 0.75:
+            continue
+        total_w = hit_w = 0.0
+        for w in s_core:
+            wt = weight(w)
+            total_w += wt
+            if max((difflib.SequenceMatcher(None, w, cw).ratio() for cw in c_core), default=0) >= 0.75:
+                hit_w += wt
+        coverage = hit_w / total_w if total_w else 0.0
+        if coverage < 0.6:
+            continue
+        whole_ratio = difflib.SequenceMatcher(None, stock_name.strip().upper(), cand.strip().upper()).ratio()
+        score = (coverage + whole_ratio) / 2
+        if score > best_score:
+            best_score, best = score, cand
+    return best if best_score >= cutoff else None
+
+
+def _read_stock_list(file_obj):
+    """
+    Reads a URA 'Stock List' export (.xls or .xlsx). Like the purchases
+    report, it has a title row above the real header.
+    """
+    raw = pd.read_excel(file_obj, header=None, nrows=20)
+    header_row = None
+    for i in range(len(raw)):
+        row_vals = [str(v).strip().upper() for v in raw.iloc[i].tolist()]
+        if "STOCK" in row_vals and any("GOODS/SERVICES NAME" in v for v in row_vals):
+            header_row = i
+            break
+    if header_row is None:
+        raise ValueError(
+            "Could not find a header row containing 'Goods/Services Name' and "
+            "'Stock' in the first 20 rows."
+        )
+    file_obj.seek(0)
+    return pd.read_excel(file_obj, header=header_row)
+
+
+def _latest_unit_prices(enriched_df):
+    """
+    Builds {normalized product name: {price, date, desc}} from an enriched
+    purchases report, keeping only the row with the most recent Invoice Date
+    per product — i.e. the price from the latest purchase invoice for that
+    good. Rows with no Unit Price (unmatched/unscraped) are ignored.
+    """
+    df = enriched_df.copy()
+    df = df[df["Unit Price"].notna() & (df["Unit Price"].astype(str).str.strip() != "")]
+    df["_date"] = pd.to_datetime(df["Invoice Date"], dayfirst=True, errors="coerce")
+    df = df.dropna(subset=["_date"]).sort_values("_date")
+
+    latest = {}
+    for _, row in df.iterrows():
+        try:
+            price = float(str(row["Unit Price"]).replace(",", "").strip())
+        except ValueError:
+            continue
+        norm = _norm_name(row["Description of Goods"])
+        # ascending date order means later rows overwrite earlier ones,
+        # so what remains is always the most recent priced purchase
+        latest[norm] = {
+            "price": price,
+            "date": row["_date"],
+            "desc": str(row["Description of Goods"]).strip(),
+        }
+    return latest
+
+
+def value_stock(enriched_df, stock_df):
+    """
+    Values a stock list using the unit price from each item's latest
+    purchase invoice (as enriched by the EFRIS Invoice Enricher).
+    Returns (valued_df, log_lines, total_value).
+    """
+    log = []
+    def L(msg): log.append(msg)
+
+    L("📋 Step 1 — Building latest-price lookup from enriched purchases...")
+    latest = _latest_unit_prices(enriched_df)
+    L(f"  ✅ {len(latest)} distinct product(s) with a priced purchase")
+
+    candidate_descs = [v["desc"] for v in latest.values()]
+
+    L("🔍 Step 2 — Matching stock items to latest purchase prices...")
+    out = stock_df.copy()
+    for col in ["Matched Purchase Item", "Unit Price", "Latest Invoice Date", "Stock Value"]:
+        out[col] = None
+
+    matched_count = 0
+    for idx, row in out.iterrows():
+        name = str(row.get("Goods/Services Name", "")).strip(" .")
+        if not name:
+            continue
+        hit_desc = _match_stock_item(name, candidate_descs) if candidate_descs else None
+        if not hit_desc:
+            L(f"  ✗ [NO MATCH]  '{name}'")
+            continue
+        info = latest.get(_norm_name(hit_desc))
+        if not info:
+            L(f"  ✗ [LOOKUP FAILED]  '{name}' → '{hit_desc}'")
+            continue
+        try:
+            stock_qty = float(str(row.get("Stock", 0)).strip())
+        except ValueError:
+            stock_qty = 0.0
+        value = round(stock_qty * info["price"], 2)
+        out.at[idx, "Matched Purchase Item"]  = info["desc"]
+        out.at[idx, "Unit Price"]             = info["price"]
+        out.at[idx, "Latest Invoice Date"]    = info["date"].strftime("%d/%m/%Y")
+        out.at[idx, "Stock Value"]            = value
+        matched_count += 1
+        tag = "EXACT" if _norm_name(name) == _norm_name(hit_desc) else "FUZZY"
+        L(f"  ✓ [{tag:5}]  '{name}'  →  '{info['desc']}'  @ {info['price']:,}  x  {stock_qty:,}  =  {value:,.2f}")
+
+    L(f"  ✅ {matched_count}/{len(out)} stock item(s) valued")
+    total_value = out["Stock Value"].dropna().astype(float).sum()
+    L(f"🏁 Total stock value: {total_value:,.2f}")
+    return out, log, total_value
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TOOL 3: Raw Material Movement Filler
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Header / output row keywords that are never raw material or product names
+_SM_HEADER_WORDS = {
+    'details', 'units', 'output', 'input', 'qty', 'price', 'amount',
+    'unit', 'measure', 'total', 'description', 'items', 'sub',
+    'out put', 'out', 'put',
+}
+
+def _norm_name(s):
+    """Uppercase + strip — used as the matching key for product names."""
+    return str(s).strip().upper()
+
+
+def _detect_sm_structure(df):
+    """
+    Dynamically locate the three key rows in ANY company's standard mix:
+      product_name_row   — first row where col C holds a real product name
+      abr_row            — product_name_row + 1  (abbreviations, kept for reference only)
+      material_start_row — first row in col A with a real ingredient name
+    Works regardless of how many header/blank rows appear before the data.
+    """
+    product_name_row = None
+    for r in range(min(10, df.shape[0])):
+        v = str(df.iloc[r, 2]).strip()
+        if v in ('nan', 'NaN', ''):
+            continue
+        try:
+            float(v); continue
+        except ValueError:
+            pass
+        if v.lower() in _SM_HEADER_WORDS:
+            continue
+        product_name_row = r
+        break
+    if product_name_row is None:
+        raise ValueError(
+            "Standard mix: cannot detect product name row. "
+            "Expected a product name in column C within the first 10 rows."
+        )
+    abr_row = product_name_row + 1
+
+    # The "OUTPUT" row (the finished-product line, whose QTY cell is where
+    # expected production belongs) explicitly marks where the raw-material
+    # list starts right below it. Found by exact label match rather than by
+    # skipping until the first non-header word, so its row number is known
+    # precisely (needed later to resolve domestic-usage formulas that
+    # reference it, e.g. "=EN8/50").
+    output_row = None
+    for r in range(abr_row + 1, min(abr_row + 20, df.shape[0])):
+        v = str(df.iloc[r, 0]).strip()
+        if v.upper() == 'OUTPUT':
+            output_row = r
+            break
+    if output_row is None:
+        raise ValueError(
+            "Standard mix: cannot find the 'OUTPUT' row (the finished-product "
+            "line that marks where the raw material list begins)."
+        )
+    material_start_row = output_row + 1
+    return product_name_row, abr_row, output_row, material_start_row
+
+
+def _parse_standard_mix(sm_bytes):
+    """
+    Parses any company's standard mix dynamically.
+
+    Matching key = NORMALISED PRODUCT NAME (uppercase, stripped).
+    ABRs are intentionally NOT used as keys because:
+      - The same ABR can appear for different products (e.g. 'BB' for both
+        'BANS BIG' and 'BUFFET BREAD' in some files).
+      - ABR spacing is inconsistent across files ('C S' vs 'CS').
+      - Product names are unambiguous and stable.
+
+    Returns:
+      products  : {norm_product_name: {'name': str, 'ratios': {mat_name: float}}}
+      materials : [(row, mat_name, unit)] — row is the 1-indexed Excel row
+                  (matching domestic_formulas' keys, and the row numbers
+                  used inside EN<row>/EO<row> formula references), NOT the
+                  0-indexed pandas row used internally while scanning.
+      domestic_formulas : {excel_row_1indexed: canonicalised_formula_or_literal}
+    """
+    df = pd.read_excel(BytesIO(sm_bytes), header=None)
+    product_name_row, abr_row, output_row, material_start_row = _detect_sm_structure(df)
+
+    # Raw materials — col 0 = name, col 1 = unit, scanned all the way to the
+    # end of the sheet rather than stopping at the first blank row. Real
+    # files have formula-active-but-unnamed "reserved" rows in the middle of
+    # this list (still legitimate, just unused slots), and some also list
+    # more named rows further down — other finished products used as an
+    # ingredient, packaging materials, labour — so a blank name can't be
+    # trusted as "the list is over"; only a genuinely named row counts.
+    materials = []
+    for r in range(material_start_row, df.shape[0]):
+        mat_name = str(df.iloc[r, 0]).strip()
+        if mat_name in ('nan', 'NaN', ''):
+            continue
+        try:
+            float(mat_name); continue
+        except ValueError:
+            pass
+        if mat_name.lower() in _SM_HEADER_WORDS:
+            continue
+        mat_unit = str(df.iloc[r, 1]).strip()
+        unit_clean = mat_unit if mat_unit not in ('nan', 'NaN', '') else ''
+        materials.append((r + 1, mat_name, unit_clean))  # +1: pandas row -> Excel row
+
+    if not materials:
+        raise ValueError(
+            "Standard mix: no raw materials found below the OUTPUT row. "
+            "Check that ingredient names start in column A."
+        )
+
+    # Products — every 5 columns starting at col 2
+    # Keyed by normalised product NAME to avoid all ABR ambiguity
+    products = {}
+    for c in range(2, df.shape[1], 5):
+        name_str = str(df.iloc[product_name_row, c]).strip()
+        # Skip empty, numeric, or header-keyword cells
+        if name_str in ('nan', 'NaN', ''):
+            continue
+        try:
+            float(name_str); continue
+        except ValueError:
+            pass
+        if name_str.lower() in _SM_HEADER_WORDS:
+            continue
+
+        ratios = {}
+        for row_idx, mat_name, _ in materials:
+            val = df.iloc[row_idx - 1, c]  # row_idx is the 1-indexed Excel row; df.iloc is 0-indexed
+            try:
+                ratios[mat_name] = (
+                    float(val) if str(val).strip() not in ('nan', 'NaN', '') else 0.0
+                )
+            except (ValueError, TypeError):
+                ratios[mat_name] = 0.0
+
+        norm = _norm_name(name_str)
+        # If two columns share the same normalised name, last one wins (edge case)
+        products[norm] = {'name': name_str, 'ratios': ratios}
+
+    if not products:
+        raise ValueError(
+            "Standard mix: no valid products found. "
+            "Check that product names appear in the first detected row."
+        )
+
+    domestic_formulas = _parse_domestic_usage_formulas(sm_bytes, output_row, df.shape[0])
+
+    return products, materials, domestic_formulas
+
+
+def _parse_domestic_usage_formulas(sm_bytes, output_row, sheet_row_count):
+    """
+    Locates the 'SUMMARY QTY CONSUMED IN PRODUCTION' and 'DOMESTIC USAGE'
+    columns by header text (their position shifts depending on how many
+    product blocks a given bakery's sheet has, so they can't be hardcoded),
+    and returns each row's DOMESTIC USAGE formula from the OUTPUT row
+    downward — with references to those two columns rewritten to canonical
+    EN<row>/EO<row> tokens so the evaluator never needs to know the real
+    column letters.
+
+    Returns {excel_row_1indexed: formula_text} — formula_text has no
+    leading '='. Rows with a plain hardcoded number get that number as a
+    string; rows with nothing in the DOMESTIC USAGE column are omitted
+    (treated as 0 by the evaluator). Returns {} if this standard mix has no
+    domestic-usage section at all.
+    """
+    from openpyxl.utils import get_column_letter
+
+    wb = openpyxl.load_workbook(BytesIO(sm_bytes), data_only=False)
+    ws = wb.active
+
+    summary_col = domestic_col = None
+    for r in range(1, min(10, ws.max_row) + 1):
+        for c in range(1, ws.max_column + 1):
+            v = ws.cell(r, c).value
+            if not isinstance(v, str):
+                continue
+            vu = v.strip().upper()
+            if vu == 'SUMMARY QTY CONSUMED IN PRODUCTION':
+                summary_col = c
+            elif vu == 'DOMESTIC USAGE':
+                domestic_col = c
+        if summary_col and domestic_col:
+            break
+
+    if domestic_col is None:
+        return {}  # this bakery's standard mix has no domestic-usage section
+
+    domestic_letter = get_column_letter(domestic_col)
+    ref_letters = [domestic_letter] + ([get_column_letter(summary_col)] if summary_col else [])
+    ref_re = re.compile(r'\$?(' + '|'.join(re.escape(l) for l in ref_letters) + r')\$?(\d+)\b')
+
+    def canon(m):
+        col, row = m.group(1), m.group(2)
+        return (f'EO{row}' if col == domestic_letter else f'EN{row}')
+
+    formulas = {}
+    start_row = output_row + 1  # openpyxl is 1-indexed; output_row (pandas 0-indexed) + 1 == its own Excel row
+    end_row = min(sheet_row_count, ws.max_row)
+    for r in range(start_row, end_row + 1):
+        v = ws.cell(r, domestic_col).value
+        if isinstance(v, str) and v.startswith('='):
+            formulas[r] = ref_re.sub(canon, v[1:])
+        elif isinstance(v, (int, float)):
+            formulas[r] = str(v)
+    return formulas
+
+
+def _eval_domestic_formula(row, domestic_formulas, production_by_row, memo, visiting=None):
+    """
+    Evaluates a canonicalised DOMESTIC USAGE formula for one standard-mix
+    row, resolving:
+      EN<row> -> that row's already-computed production consumption
+                 for the day currently being processed
+      EO<row> -> that row's own domestic-usage formula, evaluated recursively
+    Only basic arithmetic (+ - * / and parentheses) plus these two reference
+    kinds are supported — a formula using anything else (a spreadsheet
+    function, say) evaluates to 0.0 rather than guessing at it.
+    """
+    if row in memo:
+        return memo[row]
+    formula = domestic_formulas.get(row)
+    if formula is None:
+        return 0.0
+    if visiting is None:
+        visiting = set()
+    if row in visiting:
+        return 0.0  # circular reference guard
+    visiting.add(row)
+
+    def replace_ref(m):
+        col, ref_row = m.group(1), int(m.group(2))
+        if col == 'EN':
+            return repr(production_by_row.get(ref_row, 0.0))
+        return repr(_eval_domestic_formula(ref_row, domestic_formulas, production_by_row, memo, visiting))
+
+    substituted = re.sub(r'(EN|EO)(\d+)', replace_ref, formula)
+    visiting.discard(row)
+
+    if not re.fullmatch(r'[0-9.\+\-\*/() \t]*', substituted):
+        memo[row] = 0.0
+        return 0.0
+    try:
+        result = float(eval(substituted, {"__builtins__": {}}, {}))
+    except Exception:
+        result = 0.0
+    memo[row] = result
+    return result
+
+
+def _parse_finished_movement(fm_bytes, qty_col=6):
+    """
+    Reads col B (product name) and a quantity column for every row —
+    col F / EXPECTED (col 6) by default, matching a bakery-style Tool 1
+    output. Pass qty_col=<detected column> to read a different quantity
+    instead, e.g. STOCK RECEIVED for a Kombucha-style Tool 1 output where
+    raw material consumption is driven by units received into stock that
+    day rather than an EXPECTED column.
+
+    expected_map  keyed by (date, NORM_PRODUCT_NAME)
+    fm_products   set of original product name strings (for display in errors)
+
+    Daily blocks carry a real date in col A only on their first row, with
+    every following row of that block left blank (col A keeps meaning
+    "same date as above" until a new date appears) — so a blank date can't
+    just be skipped, it has to inherit the last real date seen. But a
+    trailing monthly-TOTAL block breaks that assumption: it starts with a
+    text label ("TOTAL") in col A, not a date, and everything below it is
+    also blank — so naively continuing to inherit "the last real date"
+    silently folds the entire month's totals into that last day. Once col A
+    holds something that isn't a date and isn't blank, everything from
+    there on is treated as outside the daily data (parsing stops).
+    """
+    wb = openpyxl.load_workbook(BytesIO(fm_bytes), data_only=True)
+    ws = wb.active
+    expected_map = {}
+    fm_products  = set()
+    current_date = None
+
+    for r in range(1, ws.max_row + 1):
+        date_v = ws.cell(r, 1).value
+        name_v = ws.cell(r, 2).value   # col B — product full name
+        exp_v  = ws.cell(r, qty_col).value
+
+        if isinstance(date_v, datetime):
+            current_date = date_v.date()
+        elif current_date is not None and date_v is not None and str(date_v).strip():
+            break  # a non-blank, non-date label (e.g. "TOTAL") ends the daily data —
+            # only once we're past the header, i.e. a real date has already been seen
+
+        if not name_v or not str(name_v).strip():
+            continue
+        name_str = str(name_v).strip()
+
+        # Skip obvious header rows
+        if name_str.upper() in ('PRODUCTS', 'DETAILS', 'DATE', 'DESCRIPTION'):
+            continue
+
+        fm_products.add(name_str)
+        if current_date is None:
+            continue
+
+        try:
+            qty = float(exp_v) if exp_v not in (None, '') else 0.0
+        except (ValueError, TypeError):
+            qty = 0.0
+
+        key = (current_date, _norm_name(name_str))
+        expected_map[key] = expected_map.get(key, 0.0) + qty
+
+    return expected_map, fm_products
+
+
+def _parse_finished_movement_stock_in(fm_bytes):
+    """
+    Kombucha-style alternative to _parse_finished_movement: raw material
+    consumption there is driven by units *received into stock* that day
+    (bottled/produced), not an EXPECTED column — Tool 1's Kombucha-style
+    output (Product Name match mode) has no EXPECTED column at all, but
+    does have STOCK RECEIVED. Locates that column by its header text (same
+    detection Tool 1 uses) and reads it the same way _parse_finished_movement
+    reads EXPECTED, reusing that function so both stay in sync.
+    """
+    wb = openpyxl.load_workbook(BytesIO(fm_bytes), data_only=True)
+    ws = wb.active
+    recv_col = _find_header_col(ws, "STOCK RECEIVED")
+    if recv_col is None:
+        raise ValueError(
+            "Could not find a 'STOCK RECEIVED' column in this Finished Goods Movement file — "
+            "check the header row wording, or switch to 'Expected quantity' mode instead."
+        )
+    return _parse_finished_movement(fm_bytes, qty_col=recv_col)
+
+
+def _match_product_name(fm_name, sm_norm_names):
+    """
+    Match a single finished-movement product name to a standard-mix product
+    name. Returns (matched_norm_name_or_None, tag_string).
+
+    A plain whole-string fuzzy ratio is unsafe here: "TOSS BREAD HALF" and
+    "TOSS BREAD BIG" share 10 of ~14 characters ("TOSS BREAD"), so a
+    character-level ratio rates them as very similar even though "Half"
+    vs "Big" makes them different products with different recipes. Instead,
+    every word that's rare across the candidate list (appears in at most
+    one of them — usually a size/variant qualifier, not generic words like
+    "BREAD" or "CAKES") must actually match before a candidate is even
+    considered — gating on just the single rarest word isn't enough when
+    two words are tied for rarest (as TOSS and HALF are here), since the
+    common word can then drag a weighted-coverage score just over the line.
+    If nothing clears the bar, it's reported as NO MATCH rather than
+    guessed at — the caller already surfaces unmatched products so they can
+    be added to the standard mix, which is safer than silently using the
+    wrong recipe.
+    """
+    t = _norm_name(fm_name)
+    if t in sm_norm_names:
+        return t, 'EXACT'
+
+    def tokens(s):
+        return [w for w in re.findall(r'[A-Z0-9]+', s) if len(w) > 1]
+
+    t_words = tokens(t)
+    if not t_words:
+        return None, 'NO MATCH'
+
+    cand_tokens = [(name, tokens(name)) for name in sm_norm_names]
+    doc_freq = {}
+    for _, c_words in cand_tokens:
+        for w in set(c_words):
+            doc_freq[w] = doc_freq.get(w, 0) + 1
+    critical = [w for w in t_words if doc_freq.get(w, 0) <= 1]
+
+    def word_hit(w, c_words):
+        return max((difflib.SequenceMatcher(None, w, cw).ratio() for cw in c_words), default=0) >= 0.75
+
+    best, best_score = None, 0.0
+    for cand, c_words in cand_tokens:
+        if not c_words:
+            continue
+        if critical and any(not word_hit(w, c_words) for w in critical):
+            continue
+        total_w = hit_w = 0.0
+        for w in t_words:
+            wt = 1.0 / (1 + doc_freq.get(w, 0))
+            total_w += wt
+            if word_hit(w, c_words):
+                hit_w += wt
+        coverage = hit_w / total_w if total_w else 0.0
+        if coverage < 0.7:
+            continue
+        whole_ratio = difflib.SequenceMatcher(None, t, cand).ratio()
+        score = (coverage + whole_ratio) / 2
+        if score > best_score:
+            best_score, best = score, cand
+
+    if best and best_score >= 0.60:
+        return best, 'FUZZY'
+    return None, 'NO MATCH'
+
+
+def _parse_rm_template(rm_bytes):
+    """
+    Reads the user's blank raw material template.
+    Detects block structure (materials per day) dynamically — works for any
+    number of materials (1 product kombucha up to 50+ product bakery).
+    """
+    wb = openpyxl.load_workbook(BytesIO(rm_bytes))
+    ws = wb.active
+
+    # First date row = start of day-1 block
+    first_data_row = None
+    for r in range(1, ws.max_row + 1):
+        if isinstance(ws.cell(r, 1).value, datetime):
+            first_data_row = r
+            break
+    if first_data_row is None:
+        raise ValueError("Raw material template: no date found in column A.")
+
+    # Second date row → block_size
+    second_date_row = None
+    for r in range(first_data_row + 1, ws.max_row + 1):
+        if isinstance(ws.cell(r, 1).value, datetime):
+            second_date_row = r
+            break
+
+    if second_date_row:
+        block_size = second_date_row - first_data_row
+    else:
+        # Single-day template: count until first blank in col B
+        block_size = 0
+        for r in range(first_data_row, ws.max_row + 1):
+            if ws.cell(r, 2).value is None and r > first_data_row:
+                block_size = r - first_data_row + 1
+                break
+        if block_size == 0:
+            block_size = ws.max_row - first_data_row + 1
+
+    n_materials = block_size - 1   # last row in every block is the blank separator
+
+    # Read material names + units from day-1 block (col B = name, col C = unit)
+    tpl_materials = []
+    for i in range(n_materials):
+        r   = first_data_row + i
+        mat = ws.cell(r, 2).value
+        unt = ws.cell(r, 3).value
+        if mat and str(mat).strip():
+            tpl_materials.append((
+                i,
+                str(mat).strip(),
+                str(unt).strip() if unt else ''
+            ))
+
+    # Map every date in the template to its block-start row
+    date_to_block_start = {}
+    for r in range(first_data_row, ws.max_row + 1):
+        v = ws.cell(r, 1).value
+        if isinstance(v, datetime):
+            date_to_block_start[v.date()] = r
+
+    return wb, ws, n_materials, tpl_materials, date_to_block_start
+
+
+def _smart_match_materials(tpl_materials, sm_materials):
+    """
+    Match raw material names in the template → raw material names in the
+    standard mix.  Uses exact then fuzzy (cutoff 0.65).
+    Returns match_map {tpl_name: sm_name_or_None}, unmatched list.
+    """
+    sm_names  = [m[1] for m in sm_materials]
+    sm_upper  = [m.upper().strip() for m in sm_names]
+    match_map = {}
+    unmatched = []
+
+    for _, tpl_name, _ in tpl_materials:
+        t = tpl_name.upper().strip()
+        matched = None
+
+        # 1. Exact
+        if t in sm_upper:
+            matched = sm_names[sm_upper.index(t)]
+
+        # 2. Fuzzy — returns best match; no substring shortcut to avoid wrong greedy hits
+        if not matched:
+            hits = difflib.get_close_matches(t, sm_upper, n=1, cutoff=0.65)
+            if hits:
+                matched = sm_names[sm_upper.index(hits[0])]
+
+        match_map[tpl_name] = matched
+        if not matched:
+            unmatched.append(tpl_name)
+
+    return match_map, unmatched
+
+
+def _clean_numeric(v):
+    """Parses a possibly comma-formatted numeric cell (e.g. "1,250.00");
+    returns None if it isn't a usable number — same cleanup already applied
+    to Unit Price elsewhere (_latest_unit_prices, value_stock)."""
+    try:
+        return float(str(v).replace(",", "").strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_purchases_for_rm(purchases_bytes, sm_material_names, date_start, date_end):
+    """
+    Reads an enriched Purchases Report (Tool 2's output) and extracts
+    per-material, per-day totals to fill STOCK RECEIVED in the Raw
+    Material Movement output — raw material stock actually starts at
+    purchasing, not at production, and without this the sheet's own
+    running Balance formula drifts negative even though the materials
+    were genuinely bought.
+
+    Only rows whose Invoice Date falls within [date_start, date_end] (the
+    Raw Material Template's own date range) are considered — the purchases
+    report can span far more months than the one currently being processed.
+
+    Matches each purchase row's 'Description of Goods' against
+    sm_material_names using the same exact-then-fuzzy matcher used
+    elsewhere in Tool 3 for template <-> standard-mix material matching.
+    A purchased item that doesn't match any material, or a material with
+    no matching purchases, is simply left alone — no fill, no error.
+
+    Multiple purchase lines for the same material on the same day are
+    combined: quantities sum, and price is the quantity-weighted average.
+
+    Returns (received_map, log_lines) where received_map is
+    {(date, sm_material_name): (total_qty, avg_price)}.
+    """
+    log_lines = []
+    df = pd.read_excel(BytesIO(purchases_bytes))
+    missing = {"Description of Goods", "Quantity", "Unit Price", "Invoice Date"} - set(df.columns)
+    if missing:
+        raise ValueError(f"Enriched Purchases Report is missing column(s): {missing}")
+
+    df = df.copy()
+    df["_date"] = pd.to_datetime(df["Invoice Date"], dayfirst=True, errors="coerce").dt.date
+    df = df[df["_date"].notna() & (df["_date"] >= date_start) & (df["_date"] <= date_end)]
+    df["_qty"] = df["Quantity"].apply(_clean_numeric)
+    df["_price"] = df["Unit Price"].apply(_clean_numeric)
+    df = df[df["_qty"].notna() & df["_price"].notna() & (df["_qty"] > 0)]
+
+    if df.empty:
+        log_lines.append("  ℹ️  No purchase rows fall within this template's date range "
+                          "(or none have a valid quantity/price) — nothing to fill.")
+        return {}, log_lines
+
+    distinct_items = df["Description of Goods"].astype(str).str.strip().unique().tolist()
+    purchase_tuples = [(i, name, '') for i, name in enumerate(distinct_items)]
+    sm_tuples = [(i, name, '') for i, name in enumerate(sm_material_names)]
+    match_map, unmatched = _smart_match_materials(purchase_tuples, sm_tuples)
+
+    df["_material"] = df["Description of Goods"].astype(str).str.strip().map(match_map)
+    matched_df = df[df["_material"].notna()]
+
+    received_map = {}
+    for (date, material), group in matched_df.groupby(["_date", "_material"]):
+        total_qty = group["_qty"].sum()
+        if total_qty <= 0:
+            continue
+        avg_price = (group["_qty"] * group["_price"]).sum() / total_qty
+        received_map[(date, material)] = (total_qty, avg_price)
+
+    for item in distinct_items:
+        sm_name = match_map.get(item)
+        tag = "EXACT" if sm_name and item.upper().strip() == sm_name.upper().strip() else ("FUZZY" if sm_name else "NO MATCH")
+        if sm_name:
+            log_lines.append(f"       ✓ [{tag:8}]  '{item}'  →  '{sm_name}'")
+        else:
+            log_lines.append(f"       ✗ [NO MATCH]  '{item}'  →  skipped (not in standard mix)")
+
+    if unmatched:
+        log_lines.append(f"  ⚠️  {len(unmatched)} purchased item(s) skipped — no matching raw material")
+    log_lines.append(f"  ✅ {len(received_map)} date-material entr{'y' if len(received_map) == 1 else 'ies'} "
+                      f"ready to fill from purchases")
+
+    return received_map, log_lines
+
+
+def _fill_stock_received(ws, tpl_materials, date_to_block_start, match_map, received_map):
+    """
+    Writes STOCK RECEIVED Qty + Unit Price into the raw material template
+    from received_map (see _parse_purchases_for_rm), reusing the same
+    tpl_materials/date_to_block_start/match_map structures Step 6 already
+    built so the rows line up exactly. The Qty column is located by header
+    text the same way Tool 1's name-match mode locates its columns; Price
+    is always the next column over, matching the Qty/Price/Amount block
+    convention used throughout these templates. Only cells with matching
+    purchase data are touched — any existing value (formula or figure) in
+    those two cells is overwritten with the real purchased quantity/price;
+    everything else (Amount, Balance, materials with no purchases) is left
+    exactly as it was.
+    """
+    recv_col = _find_header_col(ws, "STOCK RECEIVED")
+    if recv_col is None:
+        return None
+    price_col = recv_col + 1
+
+    sm_to_offset = {}
+    for offset, tpl_name, _ in tpl_materials:
+        sm_name = match_map.get(tpl_name)
+        if sm_name:
+            sm_to_offset[sm_name] = offset
+
+    filled = 0
+    for (date, sm_name), (qty, price) in received_map.items():
+        offset = sm_to_offset.get(sm_name)
+        block_start = date_to_block_start.get(date)
+        if offset is None or block_start is None:
+            continue
+        row = block_start + offset
+        ws.cell(row, recv_col).value = round(qty, 4)
+        ws.cell(row, price_col).value = round(price, 4)
+        filled += 1
+    return filled
+
+
+def _calculate_and_fill(wb, ws, tpl_materials, date_to_block_start,
+                         match_map, products, expected_map, fm_name_to_sm_norm,
+                         materials, domestic_formulas):
+    """
+    For each day:
+      1. Production consumption is computed for EVERY row in the standard
+         mix's material list, not just the ones the template has a slot
+         for — domestic-usage formulas can reference *other* materials'
+         production totals (this bakery's domestic oil/fat/salt usage are
+         all defined as multiples of flour's production total), so all of
+         them need to be available before any domestic figure can be
+         evaluated.
+      2. For each raw material the template actually has a slot for:
+           col 9 = production consumption + domestic usage
+         where domestic usage is evaluated from the standard mix's own
+         DOMESTIC USAGE column formulas (see _eval_domestic_formula) rather
+         than invented — this bakery already defines exactly what its
+         domestic usage should be, the same way it defines material ratios.
+
+    products      keyed by norm_product_name
+    expected_map  keyed by (date, norm_product_name_from_fm)
+    fm_name_to_sm_norm maps norm FM product name → norm SM product name
+                        (handles fuzzy name differences between files)
+    materials     [(row, mat_name, unit)] — every named row below OUTPUT
+    Only col 9 is written; all other formulas in the template are preserved.
+    """
+    name_to_row = {mat_name: row for row, mat_name, _ in materials}
+
+    filled = 0
+    for date_obj, block_start in sorted(date_to_block_start.items()):
+        production_by_row = {}
+        for row_idx, mat_name, _ in materials:
+            total = 0.0
+            for norm_fm, exp in expected_map.items():
+                if norm_fm[0] != date_obj or exp == 0.0:
+                    continue
+                sm_norm = fm_name_to_sm_norm.get(norm_fm[1])
+                if sm_norm is None:
+                    continue
+                prod = products.get(sm_norm)
+                if prod is None:
+                    continue
+                ratio = prod['ratios'].get(mat_name, 0.0)
+                total += ratio * exp
+            production_by_row[row_idx] = total
+
+        memo = {}
+        for offset, tpl_name, _ in tpl_materials:
+            sm_mat_name = match_map.get(tpl_name)
+            if sm_mat_name is None:
+                continue
+            row_idx = name_to_row.get(sm_mat_name)
+            if row_idx is None:
+                continue
+
+            production = production_by_row.get(row_idx, 0.0)
+            domestic = _eval_domestic_formula(row_idx, domestic_formulas, production_by_row, memo)
+            total = production + domestic
+
+            if total > 0:
+                ws.cell(block_start + offset, 9).value = round(total, 4)
+                filled += 1
+
+    return wb, filled
+
+
+def _run_raw_material_calc(products, sm_materials, domestic_formulas, fm_file, rm_template_file, output_name, log, L,
+                            fm_mode="expected", purchases_file=None):
+    """
+    Shared by both the Excel-parsed standard mix path and the in-app
+    configured standard mix path — Steps 2-6 are identical either way, so
+    both paths are guaranteed to produce identical output for equivalent
+    standard-mix data. Returns (out_bytes_or_None, log).
+
+    fm_mode picks how the Finished Goods Movement file's quantity gets
+    read: "expected" (default) reads the EXPECTED column, matching a
+    bakery-style Tool 1 output; "stock_in" reads STOCK RECEIVED instead,
+    for a Kombucha-style Tool 1 output where raw material consumption is
+    driven by units received into stock that day, not an EXPECTED figure.
+
+    purchases_file is optional — when provided (Tool 2's enriched Purchases
+    Report), Step 7 fills STOCK RECEIVED Qty/Price from real purchases so
+    the sheet's running Balance reflects actual stock instead of drifting
+    negative. Omitted entirely, behavior is unchanged from before this
+    existed.
+    """
+    try:
+        # ── Step 2: Finished Movement ────────────────────────────────────────
+        fm_bytes  = fm_file.read()
+        if fm_mode == "stock_in":
+            L("📋 Step 2 — Parsing finished movement (STOCK RECEIVED column)...")
+            expected_map, fm_products = _parse_finished_movement_stock_in(fm_bytes)
+        else:
+            L("📋 Step 2 — Parsing finished movement (EXPECTED column)...")
+            expected_map, fm_products = _parse_finished_movement(fm_bytes)
+        non_zero  = sum(1 for v in expected_map.values() if v > 0)
+        L(f"  ✅ {len(fm_products)} product name(s) | "
+          f"{len(expected_map)} date-product pairs ({non_zero} with data)")
+
+        # ── Step 3: Match FM product names → SM product names ────────────────
+        L("🔍 Step 3 — Matching finished movement products to standard mix...")
+        sm_norm_list = list(products.keys())   # normalised SM product names
+        fm_name_to_sm_norm = {}
+        missing = []
+        fuzzy_warnings = []
+
+        for fm_name in sorted(fm_products):
+            matched_norm, tag = _match_product_name(fm_name, sm_norm_list)
+            if matched_norm:
+                fm_name_to_sm_norm[_norm_name(fm_name)] = matched_norm
+                sm_display = products[matched_norm]['name']
+                L(f"       ✓ [{tag:8}]  '{fm_name}'  →  '{sm_display}'")
+                if tag == 'FUZZY':
+                    fuzzy_warnings.append((fm_name, sm_display))
+            else:
+                missing.append(fm_name)
+                L(f"       ✗ [NO MATCH]  '{fm_name}'  →  NOT FOUND in standard mix")
+
+        if missing:
+            L(f"  ❌ {len(missing)} product(s) from the finished movement could not be "
+              f"matched to any product in the standard mix:")
+            for m in missing:
+                L(f"       • '{m}'")
+            L("  ⚠️  Add these products to the standard mix before processing.")
+            return None, log
+
+        if fuzzy_warnings:
+            L(f"  ⚠️  {len(fuzzy_warnings)} product(s) matched by fuzzy name — "
+              f"please verify these are correct:")
+            for fm_n, sm_n in fuzzy_warnings:
+                L(f"       '{fm_n}'  →  '{sm_n}'")
+
+        L(f"  ✅ All {len(fm_products)} product(s) matched successfully")
+
+        # ── Step 4: Raw Material Template ────────────────────────────────────
+        L("📋 Step 4 — Reading raw material template structure...")
+        rm_bytes  = rm_template_file.read()
+        wb, ws, n_materials, tpl_materials, date_to_block_start = _parse_rm_template(rm_bytes)
+        L(f"  ✅ {len(date_to_block_start)} day(s) | {n_materials} material row(s) per day")
+        L("  📄 Template materials:")
+        for _, name, unit in tpl_materials:
+            L(f"       • {name} ({unit})")
+
+        # ── Step 5: Match template material names → SM material names ────────
+        L("🔗 Step 5 — Matching template materials to standard mix...")
+        match_map, unmatched = _smart_match_materials(tpl_materials, sm_materials)
+        matched_n = sum(1 for v in match_map.values() if v)
+        L(f"  ✅ {matched_n}/{len(tpl_materials)} raw material(s) matched")
+        for tpl_n, sm_n in match_map.items():
+            if sm_n:
+                tag = "EXACT" if tpl_n.upper().strip() == sm_n.upper().strip() else "FUZZY"
+                L(f"       ✓ [{tag}]  '{tpl_n}'  →  '{sm_n}'")
+            else:
+                L(f"       ✗ [NO MATCH]  '{tpl_n}'  →  will be left blank in output")
+        if unmatched:
+            L(f"  ⚠️  {len(unmatched)} raw material(s) unmatched — "
+              f"verify spelling between template and standard mix")
+
+        # ── Step 6: Calculate and fill ───────────────────────────────────────
+        L("⚙️  Step 6 — Calculating STOCK ISSUED TO PRODUCTION (production + domestic usage)...")
+        wb_out, filled = _calculate_and_fill(
+            wb, ws, tpl_materials, date_to_block_start,
+            match_map, products, expected_map, fm_name_to_sm_norm,
+            sm_materials, domestic_formulas
+        )
+        L(f"  ✅ {filled} cell(s) written to STOCK ISSUED TO PRODUCTION (col I)")
+
+        # ── Step 7 (optional): Fill STOCK RECEIVED from purchases ─────────────
+        if purchases_file is not None:
+            L("🧾 Step 7 — Filling STOCK RECEIVED from the enriched Purchases Report...")
+            purchases_bytes = purchases_file.read()
+            date_start = min(date_to_block_start)
+            date_end = max(date_to_block_start)
+            sm_material_names = [name for _, name, _ in sm_materials]
+            received_map, purchase_log = _parse_purchases_for_rm(
+                purchases_bytes, sm_material_names, date_start, date_end
+            )
+            for line in purchase_log:
+                L(line)
+            recv_filled = _fill_stock_received(ws, tpl_materials, date_to_block_start, match_map, received_map)
+            if recv_filled is None:
+                L("  ⚠️  Could not find a 'STOCK RECEIVED' column in this template — skipped.")
+            else:
+                L(f"  ✅ {recv_filled} cell(s) filled in STOCK RECEIVED (Qty + Unit Price)")
+
+        out = BytesIO()
+        wb_out.save(out)
+        out.seek(0)
+        L(f"✅ Complete — ready to download: {output_name}")
+        return out, log
+
+    except Exception as e:
+        import traceback
+        L(f"❌ Error: {str(e)}")
+        L(traceback.format_exc())
+        return None, log
+
+
+def process_raw_material_movement(sm_file, fm_file, rm_template_file, output_name, fm_mode="expected",
+                                   purchases_file=None):
+    """Master function called from Streamlit UI — Standard Mix Excel path."""
+    log = []
+    def L(msg): log.append(msg)
+
+    try:
+        # ── Step 1: Standard Mix ─────────────────────────────────────────────
+        L("📋 Step 1 — Parsing standard mix...")
+        sm_bytes  = sm_file.read()
+        products, sm_materials, domestic_formulas = _parse_standard_mix(sm_bytes)
+        L(f"  ✅ {len(products)} finished product(s) | {len(sm_materials)} named line(s) in "
+          f"standard mix (ingredients, and possibly packaging/cross-product/labour if used)")
+        if domestic_formulas:
+            L(f"  ✅ Domestic usage section found — {len(domestic_formulas)} row(s) with a formula")
+        else:
+            L("  ℹ️  No domestic usage section found in this standard mix — domestic usage will be 0")
+        L("  📦 Products in standard mix:")
+        for norm, p in products.items():
+            L(f"       • {p['name']}")
+    except Exception as e:
+        import traceback
+        L(f"❌ Error: {str(e)}")
+        L(traceback.format_exc())
+        return None, log
+
+    return _run_raw_material_calc(products, sm_materials, domestic_formulas,
+                                   fm_file, rm_template_file, output_name, log, L, fm_mode=fm_mode,
+                                   purchases_file=purchases_file)
+
+
+def _config_to_sm_data(config):
+    """
+    Converts an in-app configured standard mix — one row per material,
+    carrying its own ratios per product and its own domestic-usage
+    multiplier, mirroring the real Standard Mix sheet's layout — into the
+    same (products, sm_materials, domestic_formulas) shape that
+    _parse_standard_mix returns from an Excel file, so both paths can share
+    _run_raw_material_calc unmodified.
+
+    Row numbers are synthetic (1-indexed by list position) — nothing outside
+    this feature reads real Excel row numbers, they only need to be unique
+    and consistent between sm_materials and domestic_formulas, which they
+    are since both are built from the same name -> row map.
+    """
+    sm_materials = [(i + 1, m['name'], m.get('unit', '')) for i, m in enumerate(config['materials'])]
+    name_to_row = {mat_name: row for row, mat_name, _ in sm_materials}
+
+    products = {
+        _norm_name(pname): {
+            'name': pname,
+            'ratios': {m['name']: m.get('ratios', {}).get(pname, 0.0) for m in config['materials']}
+        }
+        for pname in config['products']
+    }
+
+    domestic_formulas = {}
+    for m in config['materials']:
+        try:
+            mult = float(m.get('domestic_mult', 0) or 0)
+        except (TypeError, ValueError):
+            mult = 0.0
+        if not mult:
+            continue
+        row = name_to_row[m['name']]
+        ref_row = name_to_row.get(m.get('domestic_ref') or m['name'], row)
+        domestic_formulas[row] = f"EN{ref_row}*{mult}"
+
+    return products, sm_materials, domestic_formulas
+
+
+def process_raw_material_movement_from_config(config, fm_file, rm_template_file, output_name, fm_mode="expected",
+                                               purchases_file=None):
+    """Master function called from Streamlit UI — in-app configured standard mix path."""
+    log = []
+    def L(msg): log.append(msg)
+
+    L("📋 Step 1 — Using configured standard mix...")
+    products, sm_materials, domestic_formulas = _config_to_sm_data(config)
+    L(f"  ✅ {len(products)} finished product(s) | {len(sm_materials)} raw material(s) configured")
+    if domestic_formulas:
+        L(f"  ✅ Domestic usage rules configured — {len(domestic_formulas)} rule(s)")
+    else:
+        L("  ℹ️  No domestic usage rules configured — domestic usage will be 0")
+    L("  📦 Products in standard mix:")
+    for norm, p in products.items():
+        L(f"       • {p['name']}")
+
+    return _run_raw_material_calc(products, sm_materials, domestic_formulas,
+                                   fm_file, rm_template_file, output_name, log, L, fm_mode=fm_mode,
+                                   purchases_file=purchases_file)
+
+
+def _empty_rm_config():
+    return {"materials": [], "products": []}
+
+
+def _cell_str(v):
+    return "" if v is None or (isinstance(v, float) and pd.isna(v)) else str(v).strip()
+
+
+def _cell_float(v, default=0.0):
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return default
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _render_sm_config_editor():
+    """
+    Renders the in-app Standard Mix config as ONE spreadsheet-style grid —
+    one row per raw material, one column per product, plus a domestic-usage
+    multiplier per row — mirroring the layout of the real Standard Mix
+    Excel file (materials down the rows, products across the columns) so
+    it's familiar to someone who already works with that sheet.
+
+    Keeps st.session_state["rm_config"] in sync; the grid is rebuilt from
+    this canonical dict every rerun and st.data_editor tracks user edits as
+    a diff against whatever it's given, so adding/removing a material row
+    or a product column stays in sync.
+    """
+    if "rm_config" not in st.session_state:
+        st.session_state["rm_config"] = _empty_rm_config()
+    cfg = st.session_state["rm_config"]
+
+    with st.expander("📂 Load a saved config"):
+        cfg_upload = st.file_uploader("Config file (.json)", type="json", key="rm_cfg_load")
+        if cfg_upload is not None and st.session_state.get("rm_cfg_loaded_name") != cfg_upload.name:
+            try:
+                loaded = json.load(cfg_upload)
+                loaded.setdefault("materials", [])
+                loaded.setdefault("products", [])
+                for m in loaded["materials"]:
+                    m.setdefault("ratios", {})
+                st.session_state["rm_config"] = loaded
+                st.session_state["rm_cfg_loaded_name"] = cfg_upload.name
+                # If you'd already edited the grid before loading a config,
+                # its own stored edit history would otherwise get reapplied
+                # on top of the newly loaded data instead of showing it as-is.
+                st.session_state.pop("rm_cfg_grid", None)
+                st.success(f"Loaded config from {cfg_upload.name}")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not read config file: {e}")
+
+    st.markdown("**Products**")
+    with st.form(key="rm_cfg_add_product_form", clear_on_submit=True):
+        fc1, fc2 = st.columns([4, 1])
+        with fc1:
+            new_prod = st.text_input(
+                "Add a product", label_visibility="collapsed",
+                placeholder="Type a product name, then press Enter or click Add Product"
+            )
+        with fc2:
+            add_clicked = st.form_submit_button("➕ Add Product", use_container_width=True)
+
+    if add_clicked:
+        name = new_prod.strip()
+        if name and name.upper() not in [p.upper() for p in cfg["products"]]:
+            cfg["products"] = cfg["products"] + [name]
+            # The product list changes the grid's COLUMN set, not just its
+            # row count. st.data_editor tracks edits as a diff (added/
+            # edited/deleted rows) against whatever it's given — right for
+            # adding/removing a material row, but a changed column set
+            # makes the old diff apply to the wrong shape, which is what
+            # made an existing product's ratios look like they'd reset.
+            # Clearing it here forces a clean rebuild from cfg (which
+            # already has every previously-entered ratio) instead of
+            # reconciling a stale diff against the new columns.
+            st.session_state.pop("rm_cfg_grid", None)
+        st.rerun()
+
+    if cfg["products"]:
+        for i, p in enumerate(cfg["products"]):
+            pc1, pc2 = st.columns([5, 1])
+            with pc1:
+                st.write(f"• {p}")
+            with pc2:
+                if st.button("✕ Remove", key=f"rm_cfg_remove_prod_{i}"):
+                    cfg["products"] = [x for x in cfg["products"] if x != p]
+                    st.session_state.pop("rm_cfg_grid", None)
+                    st.rerun()
+    else:
+        st.info("Add at least one product above to build the grid.")
+        st.download_button("💾 Download this config (.json)", data=json.dumps(cfg, indent=2),
+                            file_name="standard_mix_config.json", mime="application/json", key="rm_cfg_download")
+        return
+
+    old_by_name = {m["name"]: m for m in cfg["materials"]}
+    columns = ["Material", "Unit", "Domestic usage (×)", "Domestic ref."] + cfg["products"]
+    grid_rows = []
+    for m in cfg["materials"]:
+        row = {
+            "Material": m["name"],
+            "Unit": m.get("unit", ""),
+            "Domestic usage (×)": m.get("domestic_mult", 0.0),
+            "Domestic ref.": m.get("domestic_ref") or m["name"],
+        }
+        for p in cfg["products"]:
+            row[p] = m.get("ratios", {}).get(p, 0.0)
+        grid_rows.append(row)
+    grid_df = pd.DataFrame(grid_rows, columns=columns)
+
+    mat_names = [m["name"] for m in cfg["materials"]] or [""]
+    st.markdown("**Standard Mix**")
+    st.caption(
+        "One row per raw material — just like your standard mix sheet. Each product column "
+        "holds the quantity of that material needed per **1 unit** of the product. "
+        "**Domestic usage (×)** = a multiplier applied to the **Domestic ref.** material's own "
+        "production total (pick the same material for a self-reference); leave 0 if not used."
+    )
+    edited = st.data_editor(
+        grid_df, num_rows="dynamic", key="rm_cfg_grid", use_container_width=True,
+        column_config={"Domestic ref.": st.column_config.SelectboxColumn(options=mat_names)},
+    )
+
+    new_materials, seen = [], set()
+    for _, row in edited.iterrows():
+        name = _cell_str(row.get("Material"))
+        if not name or name.upper() in seen:
+            continue
+        seen.add(name.upper())
+        new_materials.append({
+            "name": name,
+            "unit": _cell_str(row.get("Unit")),
+            "domestic_mult": _cell_float(row.get("Domestic usage (×)"), 0.0),
+            "domestic_ref": _cell_str(row.get("Domestic ref.")) or name,
+            "ratios": {p: _cell_float(row.get(p), 0.0) for p in cfg["products"]},
+        })
+    cfg["materials"] = new_materials
+
+    st.download_button("💾 Download this config (.json)", data=json.dumps(cfg, indent=2),
+                        file_name="standard_mix_config.json", mime="application/json", key="rm_cfg_download")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NAVIGATION
+# ─────────────────────────────────────────────────────────────────────────────
+
+TOOLS = [
+    "Excel Stock Movement Filler",
+    "EFRIS Invoice Enricher",
+    "Raw Material Movement Filler",
+    "Audit Compliance Checker (Coming Soon)",
+    "Financial Report Generator (Coming Soon)",
+    "Sales Dashboard (Coming Soon)",
+]
+TOOL_LABELS = {
+    "Excel Stock Movement Filler":              "▤  Stock Movement Filler",
+    "EFRIS Invoice Enricher":                   "◈  EFRIS Invoice Enricher",
+    "Raw Material Movement Filler":             "⚗  Raw Material Filler",
+    "Audit Compliance Checker (Coming Soon)":   "○  Audit Compliance · soon",
+    "Financial Report Generator (Coming Soon)": "○  Financial Reports · soon",
+    "Sales Dashboard (Coming Soon)":            "○  Sales Dashboard · soon",
+}
+
+with st.sidebar:
+    st.markdown(
+        '<div class="brand"><div class="brand-mark">A</div>'
+        '<div><div class="brand-name">Automation Hub</div>'
+        '<div class="brand-sub">Stock &amp; finance workflows</div></div></div>'
+        '<div class="nav-label">Tools</div>',
+        unsafe_allow_html=True)
+    if st.session_state.get("nav_tool") not in TOOLS:
+        st.session_state["nav_tool"] = TOOLS[0]
+    for i, t in enumerate(TOOLS):
+        st.button(TOOL_LABELS.get(t, t), key=f"nav_btn_{i}", use_container_width=True,
+                  type="primary" if st.session_state["nav_tool"] == t else "secondary",
+                  on_click=lambda t=t: st.session_state.update(nav_tool=t))
+    tool = st.session_state["nav_tool"]
+    st.markdown(
+        '<div class="side-foot"><b>Tip</b><br>Files are processed in memory and are never '
+        'stored. Download your result before switching tools.</div>',
+        unsafe_allow_html=True)
+
+
+# ── TOOL 1 UI ────────────────────────────────────────────────────────────────
+if tool == "Excel Stock Movement Filler":
+    _hero("Tool 01 · Inventory",
+          "Stock Movement Filler",
+          "Fill your daily stock movement template from the system movement report. "
+          "Damages are spread across production days in proportion to volume, and "
+          "expected vs actual figures are generated automatically.",
+          chips=("Template + movement report", "Damages optional", "90 / 10 production · packaging"))
+
+    with st.container(border=True):
+        _section("01", "Settings", "How the output is named and how products are matched to the template.")
+        s1, s2 = st.columns([1, 1.4], gap="large")
+        with s1:
+            output_name = st.text_input("Output filename", value="filled_template")
+            output_name = output_name.removesuffix(".xlsx").strip() + ".xlsx"
+        with s2:
+            match_label = st.radio(
+                "Match products by",
+                ["Product Code (existing)", "Product Name"],
+                horizontal=True,
+                help="Product Code: uses the short code in column C of your template (the usual bakery-style "
+                     "template). Product Name: matches on the full product name instead — use this when column "
+                     "C holds something else (like a unit of measure) instead of a unique per-product code."
+            )
+        match_by = "code" if match_label == "Product Code (existing)" else "name"
+
+    with st.container(border=True):
+        _section("02", "Source files", "Template and movement report are required; damages are optional.")
+        f1, f2, f3 = st.columns(3, gap="medium")
+        with f1:
+            template_file = st.file_uploader("Template (.xlsx)", type="xlsx")
+        with f2:
+            report_file   = st.file_uploader("Movement report (.xlsx)", type="xlsx")
+        with f3:
+            damages_file  = st.file_uploader(
+                "Damages (.xlsx) — optional",
+                type="xlsx",
+                help="Leave empty if this business doesn't track damages separately; damages will be treated as zero."
+            )
+
+    if st.button("Process files", type="primary", use_container_width=True):
+        if template_file and report_file:
+            with st.spinner("Filling your template…"):
+                out = process_excel(template_file, report_file, damages_file, output_name, match_by=match_by)
+                if out:
+                    st.success(f"Your template is ready — **{output_name}**")
+                    st.download_button("⬇  Download filled template", data=out, file_name=output_name,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        type="primary", use_container_width=True)
+        else:
+            st.warning("Upload the Template and Movement Report.")
+
+
+# ── TOOL 2 UI ────────────────────────────────────────────────────────────────
+elif tool == "EFRIS Invoice Enricher":
+    _hero("Tool 02 · Tax & Purchases",
+          "EFRIS Invoice Enricher",
+          "Upload your Purchases Report (the URA “VAT Purchases Report” export works directly) "
+          "with <b>FDN</b> and <b>Description of Goods</b>. Each invoice is opened on EFRIS and "
+          "<b>Quantity</b>, <b>Unit Measure</b> and <b>Unit Price</b> are filled for every row.",
+          chips=("Duplicate FDNs fetched once", ".xlsx or .xls", "Then value your stock"))
+
+    with st.container(border=True):
+        _section("01", "Purchases report", "Required columns: FDN and Description of Goods.")
+        col1, col2 = st.columns([2, 1], gap="large")
+        with col1:
+            purchases_file = st.file_uploader("Purchases Report (.xlsx or .xls)", type=["xlsx", "xls"], key="ef_up")
+        with col2:
+            out_name = st.text_input("Output filename", value="enriched_purchases", key="ef_out")
+            out_name = out_name.removesuffix(".xlsx").strip() + ".xlsx"
+        if purchases_file:
+            try:
+                prev = _read_purchases_report(purchases_file)
+                purchases_file.seek(0)
+                st.caption("Preview — first 5 rows")
+                st.dataframe(prev.head(5), use_container_width=True)
+                missing = {"FDN", "Description of Goods"} - set(prev.columns)
+                if missing:
+                    st.error(f"Missing columns: {missing}")
+                    purchases_file = None
+            except Exception as e:
+                st.error(str(e)); purchases_file = None
+
+    if st.button("Start enrichment", type="primary", use_container_width=True,
+                 disabled=(purchases_file is None), key="ef_run"):
+        prog   = st.progress(0, text="Starting...")
+        log_ph = st.empty()
+        try:
+            df       = _read_purchases_report(purchases_file)
+            enriched = run_efris_enrichment(df, log_ph, prog)
+            prog.progress(1.0, text="✅ Done!")
+            st.session_state["efris_enriched_df"] = enriched
+            st.session_state["efris_out_name"]    = out_name
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+    # Kept outside the button block (gated on session_state instead) so the
+    # download button and the stock-valuation prompt below both survive
+    # later reruns — e.g. uploading the Stock List file — instead of
+    # disappearing the moment a different widget is interacted with.
+    if "efris_enriched_df" in st.session_state:
+        enriched = st.session_state["efris_enriched_df"]
+        filled = enriched["Quantity"].notna().sum()
+        with st.container(border=True):
+            m1, m2, m3 = st.columns([1, 1, 1.4])
+            m1.metric("Rows enriched", f"{filled:,}")
+            m2.metric("Total rows", f"{len(enriched):,}")
+            with m3:
+                st.download_button("⬇  Download enriched Excel",
+                    data=build_output_excel(enriched),
+                    file_name=st.session_state.get("efris_out_name", out_name),
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="ef_download", type="primary", use_container_width=True)
+
+    # Value Stock is intentionally NOT gated on having just run an
+    # enrichment in this session — if you already have a previously
+    # downloaded enriched Purchases Report, you can upload it directly and
+    # skip re-running EFRIS enrichment entirely.
+    st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+    with st.container(border=True):
+        _section("02", "Value stock",
+                 "Value your closing stock using the unit price from each item's latest purchase invoice.")
+
+        has_session_data = "efris_enriched_df" in st.session_state
+        if has_session_data:
+            source_choice = st.radio(
+                "Enriched purchases data",
+                ["Use the result from the enrichment above", "Upload an enriched Purchases Report instead"],
+                key="sv_source", horizontal=True)
+        else:
+            source_choice = "Upload an enriched Purchases Report instead"
+            st.caption("No enrichment run yet this session — upload a previously-downloaded "
+                       "enriched Purchases Report (the file with Quantity/Unit Measure/Unit "
+                       "Price already filled in) to continue.")
+
+        enriched_for_valuation = None
+        v1, v2 = st.columns(2, gap="medium")
+        if source_choice == "Use the result from the enrichment above":
+            enriched_for_valuation = st.session_state["efris_enriched_df"]
+        else:
+            with v1:
+                enriched_upload = st.file_uploader(
+                    "Enriched Purchases Report (.xlsx or .xls)",
+                    type=["xlsx", "xls"], key="sv_enriched_up")
+            if enriched_upload:
+                try:
+                    enriched_for_valuation = pd.read_excel(enriched_upload)
+                    missing = {"Description of Goods", "Unit Price", "Invoice Date"} - set(enriched_for_valuation.columns)
+                    if missing:
+                        st.error(f"Missing columns in enriched file: {missing}")
+                        enriched_for_valuation = None
+                except Exception as e:
+                    st.error(str(e))
+
+        with (v2 if source_choice != "Use the result from the enrichment above" else v1):
+            stock_file = st.file_uploader("Stock List (.xlsx or .xls)", type=["xlsx", "xls"], key="sv_up")
+
+    if st.button("Value stock", type="primary", use_container_width=True,
+                 disabled=(stock_file is None or enriched_for_valuation is None), key="sv_run"):
+        try:
+            stock_df = _read_stock_list(stock_file)
+            valued_df, val_log, total_value = value_stock(enriched_for_valuation, stock_df)
+            st.metric("Total stock value", f"UGX {total_value:,.2f}")
+            st.markdown('<div class="log-box">' + "<br>".join(val_log) + "</div>", unsafe_allow_html=True)
+            st.download_button("⬇  Download valued stock list",
+                data=build_output_excel(
+                    valued_df, sheet_name="Stock Valuation",
+                    highlight_cols=("Matched Purchase Item", "Unit Price",
+                                     "Latest Invoice Date", "Stock Value")),
+                file_name="stock_valuation.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="sv_download", type="primary", use_container_width=True)
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+
+# ── TOOL 3 UI ────────────────────────────────────────────────────────────────
+elif tool == "Raw Material Movement Filler":
+    _hero("Tool 03 · Production",
+          "Raw Material Movement Filler",
+          "Calculates <b>Stock Issued to Production</b> for every raw material, every day — "
+          "derived from the finished goods movement and your company's standard mix ratios. "
+          "All existing template formulas are preserved.",
+          chips=("Standard mix: upload or configure", "Uses Tool 01 output", "Optional purchases fill"))
+
+    with st.expander("How it works"):
+        st.markdown(
+            '<div class="info-card" style="margin:0;box-shadow:none;border:none;padding:4px 2px;">'
+            '<p>For each day and each raw material:</p>'
+            '<span class="formula">Issued = Σ (input/unit ratio × EXPECTED quantity)</span>'
+            '<p>across all finished products. The result is written into the <b>STOCK ISSUED TO '
+            'PRODUCTION</b> column of your raw material template. Bal b/f carry-forwards, totals '
+            'and other formulas stay intact.</p>'
+            '<div class="note">⚠ All products in the finished movement <b>must</b> be present in the '
+            'standard mix. The tool lists any missing ones and stops before making changes.</div>'
+            '</div>',
+            unsafe_allow_html=True)
+
+    with st.container(border=True):
+        _section("01", "Data sources", "Where the standard mix and finished quantities come from.")
+        r1, r2 = st.columns(2, gap="large")
+        with r1:
+            sm_mode = st.radio(
+                "Standard Mix source",
+                ["Upload Excel file", "Configure in-app"],
+                key="rm_sm_mode", horizontal=True,
+                help="Upload your existing Standard Mix Excel file, or build/edit one directly in the app."
+            )
+        with r2:
+            fm_mode_label = st.radio(
+                "Finished Movement quantity source",
+                ["Expected quantity (existing)", "Stock Received (Kombucha-style)"],
+                key="rm_fm_mode", horizontal=True,
+                help="Expected quantity: reads Tool 1's EXPECTED column, for a bakery-style Tool 1 output. "
+                     "Stock Received: reads Tool 1's STOCK RECEIVED column instead, for a Kombucha-style "
+                     "output where raw material usage is driven by units received into stock that day."
+            )
+        fm_mode = "expected" if fm_mode_label == "Expected quantity (existing)" else "stock_in"
+
+    sm_file = None
+    if sm_mode == "Configure in-app":
+        with st.container(border=True):
+            _section("01b", "Configure standard mix")
+            _render_sm_config_editor()
+
+    with st.container(border=True):
+        _section("02", "Files")
+        c1, c2, c3 = st.columns(3, gap="medium")
+        with c1:
+            if sm_mode == "Upload Excel file":
+                sm_file = st.file_uploader(
+                    "① Standard Mix (.xlsx)",
+                    type="xlsx", key="rm_sm",
+                    help="Your company's standard mix with products and raw material ratios."
+                )
+            else:
+                cfg = st.session_state.get("rm_config", _empty_rm_config())
+                st.markdown("**① Standard Mix**")
+                st.caption(f"Using configured standard mix — {len(cfg['materials'])} material(s), "
+                           f"{len(cfg['products'])} product(s).")
+        with c2:
+            fm_file = st.file_uploader(
+                "② Finished Goods Movement (.xlsx)",
+                type="xlsx", key="rm_fm",
+                help="Output of Tool 1 — EXPECTED or STOCK RECEIVED column, matching the source picked above."
+            )
+        with c3:
+            rm_file = st.file_uploader(
+                "③ Raw Material Template (.xlsx)",
+                type="xlsx", key="rm_tpl",
+                help="Your blank raw material movement template (company-specific)."
+            )
+
+        with st.expander("④ Optional: fill STOCK RECEIVED from a Purchases Report"):
+            st.caption(
+                "Raw material stock actually starts at purchasing, not at production — without this, "
+                "STOCK ISSUED TO PRODUCTION gets filled but STOCK RECEIVED stays empty and the sheet's "
+                "running Balance drifts negative. Upload Tool 2's enriched Purchases Report (with the "
+                "raw material item names already edited to match this standard mix, and quantities "
+                "already converted to the units this template uses) and it'll fill STOCK RECEIVED Qty "
+                "and Unit Price for each raw material on the exact day it was purchased, within this "
+                "template's own date range. Purchased items that don't match a material, or materials "
+                "with no matching purchases, are left alone. Leave this empty to skip it entirely."
+            )
+            purchases_file = st.file_uploader(
+                "Enriched Purchases Report (.xlsx)",
+                type="xlsx", key="rm_purchases",
+                help="Output of Tool 2's EFRIS Invoice Enricher."
+            )
+
+        out_name_rm = st.text_input("Output filename", value="raw_material_filled", key="rm_out")
+        out_name_rm = out_name_rm.removesuffix(".xlsx").strip() + ".xlsx"
+
+    # Show previews of each uploaded file. Converted to strings before
+    # display — a raw header=None read mixes real dates with blank
+    # separator rows in the same column, which pyarrow (Streamlit's
+    # dataframe renderer) can't serialize directly; this is a preview only,
+    # not what actually gets parsed for processing.
+    if sm_file:
+        try:
+            sm_prev = pd.read_excel(sm_file, header=None, nrows=4)
+            sm_file.seek(0)
+            with st.expander("Preview: Standard Mix (first 4 rows)"):
+                st.dataframe(sm_prev.astype(str), use_container_width=True)
+        except Exception:
+            pass
+
+    if fm_file:
+        try:
+            fm_prev = pd.read_excel(fm_file, header=None, nrows=8)
+            fm_file.seek(0)
+            with st.expander("Preview: Finished Goods Movement (first 8 rows)"):
+                st.dataframe(fm_prev.astype(str), use_container_width=True)
+        except Exception:
+            pass
+
+    if rm_file:
+        try:
+            rm_prev = pd.read_excel(rm_file, header=None, nrows=8)
+            rm_file.seek(0)
+            with st.expander("Preview: Raw Material Template (first 8 rows)"):
+                st.dataframe(rm_prev.astype(str), use_container_width=True)
+        except Exception:
+            pass
+
+    if sm_mode == "Upload Excel file":
+        sm_ready = bool(sm_file)
+    else:
+        rm_cfg = st.session_state.get("rm_config", _empty_rm_config())
+        sm_ready = bool(rm_cfg["materials"]) and bool(rm_cfg["products"])
+
+    all_uploaded = sm_ready and fm_file and rm_file
+    if not all_uploaded:
+        if sm_mode == "Upload Excel file":
+            st.info("Upload all three files above to proceed.")
+        else:
+            st.info("Configure at least one material and one product above, and upload the "
+                     "Finished Goods Movement and Raw Material Template, to proceed.")
+
+    if st.button("Generate raw material movement", type="primary", use_container_width=True,
+                 disabled=not all_uploaded, key="rm_run"):
+        log_ph = st.empty()
+        with st.spinner("Processing..."):
+            if sm_mode == "Upload Excel file":
+                out_bytes, log_lines = process_raw_material_movement(
+                    sm_file, fm_file, rm_file, out_name_rm, fm_mode=fm_mode, purchases_file=purchases_file
+                )
+            else:
+                out_bytes, log_lines = process_raw_material_movement_from_config(
+                    st.session_state["rm_config"], fm_file, rm_file, out_name_rm, fm_mode=fm_mode,
+                    purchases_file=purchases_file
+                )
+        # Show log
+        log_ph.markdown(
+            '<div class="log-box">' + "<br>".join(log_lines) + "</div>",
+            unsafe_allow_html=True
+        )
+        if out_bytes:
+            st.success("Processing complete!")
+            st.download_button(
+                "⬇  Download filled raw material movement",
+                data=out_bytes,
+                file_name=out_name_rm,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary", use_container_width=True
+            )
+        else:
+            st.error("Processing failed. See the log above for details.")
+
+
+# ── COMING SOON ──────────────────────────────────────────────────────────────
+elif "Coming Soon" in tool:
+    name = tool.replace(" (Coming Soon)", "")
+    _hero("On the roadmap", name, "This tool is being built and will appear here when it's ready.")
+    st.markdown(
+        f'<div class="soon"><div class="badge">Coming soon</div><h3>{name}</h3>'
+        '<p>Use the tools in the sidebar in the meantime.</p></div>',
+        unsafe_allow_html=True)
