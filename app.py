@@ -1,4 +1,4 @@
-import os, time, re, glob, json, threading
+import os, time, re, glob, json, threading, tempfile
 import streamlit as st
 import openpyxl
 import pandas as pd
@@ -869,50 +869,154 @@ def _close_http_session(holder):
             pass
 
 
-_http_cooldown = {"until": 0.0}
-_http_cooldown_lock = threading.Lock()
+class _EfrisRateGate:
+    """Shared, adaptive pacing for the direct EFRIS requests.
+
+    EFRIS accepts a steady stream but, if pushed too hard for too long, starts
+    answering with an HTML page instead of the PDF for a few minutes. So every
+    request takes a turn here: requests are spaced out (and gently speed up
+    while EFRIS keeps accepting them). When EFRIS starts rejecting, ALL
+    connections pause together, the pace is slowed, and the pause grows
+    (5s, 10s, 20s ... up to 2 minutes) until EFRIS accepts again. Only after
+    several minutes of this does an invoice get handed to the browser."""
+    START_INTERVAL = 0.22     # ~4.5 requests/second to begin with
+    MIN_INTERVAL = 0.18       # never faster than ~5.5 requests/second overall
+    MAX_INTERVAL = 2.0        # slowest pace after repeated rejections
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.reset()
+
+    def reset(self):
+        self.interval = self.START_INTERVAL
+        self.next_slot = 0.0
+        self.pause_until = 0.0
+        self.backoff = 5.0
+        self.ok_streak = 0
+        self.pauses = 0
+
+    def wait_turn(self):
+        with self.lock:
+            now = time.time()
+            start = max(now, self.next_slot, self.pause_until)
+            self.next_slot = start + self.interval
+        if start > now:
+            time.sleep(start - now)
+
+    def good(self):
+        with self.lock:
+            self.ok_streak += 1
+            if self.ok_streak >= 25:
+                self.ok_streak = 0
+                self.interval = max(self.MIN_INTERVAL, self.interval * 0.9)
+                self.backoff = max(5.0, self.backoff / 2)
+
+    def rejected(self):
+        with self.lock:
+            now = time.time()
+            self.ok_streak = 0
+            if now < self.pause_until:
+                return        # already pausing for this wave of rejections
+            self.pauses += 1
+            self.interval = min(self.MAX_INTERVAL, self.interval * 1.5)
+            self.pause_until = now + self.backoff
+            self.backoff = min(120.0, self.backoff * 2)
 
 
-def _fetch_pdf_http(holder, fdn, attempts=5):
+_http_gate = _EfrisRateGate()
+
+
+def _fetch_pdf_http(holder, fdn, attempts=8):
     """Return the invoice PDF bytes. `holder` is a one-item list owning the
     worker's session so it can be swapped for a fresh one after a failure.
-
-    EFRIS sometimes answers a burst of requests with an HTML page instead of
-    the PDF. When that happens every worker pauses (shared cooldown) and the
-    failed request is retried on a fresh session after a growing wait."""
+    Raises only after several minutes of rejections (see _EfrisRateGate)."""
     last = "unknown error"
     for attempt in range(attempts):
-        wait = _http_cooldown["until"] - time.time()
-        if wait > 0:
-            time.sleep(wait)
+        _http_gate.wait_turn()
         try:
             if holder[0] is None:
                 holder[0] = _new_http_session()
             r = holder[0].get(EFRIS_PDF_URL.format(fdn), timeout=30)
             if r.status_code == 200 and r.content[:4] == b"%PDF":
+                _http_gate.good()
                 return r.content
             last = f"HTTP {r.status_code}, response was not a PDF"
         except Exception as e:
             last = f"{type(e).__name__}: {str(e)[:80]}"
         _close_http_session(holder)   # next attempt starts a fresh session
-        with _http_cooldown_lock:
-            _http_cooldown["until"] = max(_http_cooldown["until"],
-                                          time.time() + 2 * (2 ** attempt))
+        _http_gate.rejected()
     raise RuntimeError(last)
 
 
-def run_efris_enrichment(purchases_df, log_placeholder, progress_bar):
+# ── Saved progress (resume) ──────────────────────────────────────────────────
+# Every invoice's contents are fixed once issued, so each finished invoice is
+# appended (one small line, written by the main thread only) to a file in the
+# server's temp folder. If a long run is interrupted (resource limit, closed
+# tab, dropped connection) and the same file is started again, invoices
+# already in this file are reused instead of fetched again. It is shared by
+# all sessions and lives only as long as the server's disk does (a full
+# reboot or redeploy clears it). Only invoices that returned items are saved,
+# so empty/failed ones are always retried.
+EFRIS_CACHE_VERSION = 1
+EFRIS_CACHE_PATH = os.path.join(tempfile.gettempdir(), f"efris_invoice_cache_v{EFRIS_CACHE_VERSION}.jsonl")
+
+
+def _load_efris_cache():
+    cache = {}
+    try:
+        with open(EFRIS_CACHE_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                    if rec.get("v") == EFRIS_CACHE_VERSION and rec.get("items"):
+                        cache[str(rec["fdn"])] = rec["items"]
+                except Exception:
+                    continue    # half-written line from an interrupted run
+    except Exception:
+        pass
+    return cache
+
+
+def _open_efris_cache_writer():
+    try:
+        # If a previous run died mid-line, start on a fresh line so the next
+        # record isn't glued onto the broken one.
+        try:
+            with open(EFRIS_CACHE_PATH, "rb") as f:
+                f.seek(-1, os.SEEK_END)
+                needs_nl = f.read(1) != b"\n"
+        except Exception:
+            needs_nl = False
+        w = open(EFRIS_CACHE_PATH, "a", encoding="utf-8")
+        if needs_nl:
+            w.write("\n")
+        return w
+    except Exception:
+        return None
+
+
+def run_efris_enrichment(purchases_df, log_placeholder, progress_bar, use_cache=True):
     import threading, queue
 
     for col in ["Quantity", "Unit Measure", "Unit Price"]:
         if col not in purchases_df.columns:
             purchases_df[col] = None
     log_lines = []
-    def log(msg):
-        log_lines.append(msg)
+    last_render = [0.0]
+
+    def render_log():
         log_placeholder.markdown(
             '<div class="log-box">' + "<br>".join(log_lines[-80:]) + "</div>",
             unsafe_allow_html=True)
+        last_render[0] = time.time()
+
+    def log(msg, force=False):
+        # Redrawing the on-screen log on every line costs more and more as
+        # runs get big (thousands of invoices), so redraw at most ~4x/second;
+        # important lines pass force=True so they always show.
+        log_lines.append(msg)
+        if force or time.time() - last_render[0] >= 0.25:
+            render_log()
     import shutil
     for name in ["chromium", "chromium-browser", "chromedriver"]:
         p = shutil.which(name) or next(
@@ -931,26 +1035,48 @@ def run_efris_enrichment(purchases_df, log_placeholder, progress_bar):
         return purchases_df
 
     fdn_cache = {}
-    n_done = 0
+    saved = _load_efris_cache() if use_cache else {}
+    for f in ordered_fdns:
+        if f in saved:
+            fdn_cache[f] = saved[f]
+    reused = len(fdn_cache)
+    todo = [f for f in ordered_fdns if f not in fdn_cache]
+    n_done = reused
+    if reused:
+        log(f"♻️  {reused} of {total_fdns} invoice(s) were already fetched in an earlier run — reusing them (resume).", force=True)
+        progress_bar.progress(min(n_done / total_fdns, 1.0), text=f"{n_done}/{total_fdns} invoices scraped")
+    cache_writer = _open_efris_cache_writer() if (use_cache and todo) else None
+    last_progress = [0.0]
 
     def report(fdn, items, err):
         nonlocal n_done
         n_done += 1
         fdn_cache[fdn] = items
-        progress_bar.progress(min(n_done / total_fdns, 1.0), text=f"{n_done}/{total_fdns} invoices scraped")
+        if cache_writer is not None and items and not err:
+            try:
+                cache_writer.write(json.dumps({"v": EFRIS_CACHE_VERSION, "fdn": fdn, "items": items},
+                                              ensure_ascii=False) + "\n")
+                cache_writer.flush()
+            except Exception:
+                pass            # saving progress must never break the run
+        now = time.time()
+        if now - last_progress[0] >= 0.25 or n_done >= total_fdns:
+            progress_bar.progress(min(n_done / total_fdns, 1.0), text=f"{n_done}/{total_fdns} invoices scraped")
+            last_progress[0] = now
         if err:
             log(f"[FDN {fdn}] ❌  {err}")
         else:
             log(f"[FDN {fdn}] ✅  {len(items)} item(s) found")
 
     # Invoices still to do after the direct pass; the browser handles these.
-    chrome_list = list(ordered_fdns)
+    chrome_list = list(todo)
     direct_ok = 0
 
-    if _http_fast_path_available():
-        log(f"⚡ Fetching {total_fdns} unique invoice(s) directly with {EFRIS_HTTP_WORKERS} parallel connection(s) (no browser)...")
+    _http_gate.reset()
+    if todo and _http_fast_path_available():
+        log(f"⚡ Fetching {len(todo)} unique invoice(s) directly with {EFRIS_HTTP_WORKERS} parallel connection(s) (no browser)...", force=True)
         http_q = queue.Queue()
-        for fdn in ordered_fdns:
+        for fdn in todo:
             http_q.put(fdn)
         http_res_q = queue.Queue()
 
@@ -971,12 +1097,12 @@ def run_efris_enrichment(purchases_df, log_placeholder, progress_bar):
                 _close_http_session(holder)
 
         http_threads = [threading.Thread(target=http_worker, daemon=True)
-                        for _ in range(min(EFRIS_HTTP_WORKERS, total_fdns))]
+                        for _ in range(min(EFRIS_HTTP_WORKERS, len(todo)))]
         for t in http_threads:
             t.start()
 
         handled, chrome_list = set(), []
-        while len(handled) < total_fdns:
+        while len(handled) < len(todo):
             try:
                 fdn, items, err = http_res_q.get(timeout=5)
             except queue.Empty:
@@ -991,11 +1117,11 @@ def run_efris_enrichment(purchases_df, log_placeholder, progress_bar):
                 report(fdn, items, None)
         for t in http_threads:
             t.join()
-        chrome_list += [f for f in ordered_fdns if f not in handled]
+        chrome_list += [f for f in todo if f not in handled]
         if chrome_list:
             log(f"↩️  {len(chrome_list)} invoice(s) could not be fetched directly — retrying them with the browser...")
-    else:
-        log("ℹ️  Direct fetch is unavailable here — using the browser for every invoice.")
+    elif todo:
+        log("ℹ️  Direct fetch is unavailable here — using the browser for every invoice.", force=True)
 
     if chrome_list:
         log(f"🚀 Scraping {len(chrome_list)} invoice(s) with the browser ({min(EFRIS_CONCURRENCY, len(chrome_list))} concurrent session(s))...")
@@ -1098,8 +1224,14 @@ def run_efris_enrichment(purchases_df, log_placeholder, progress_bar):
         for t in threads:
             t.join()
 
+    if cache_writer is not None:
+        try:
+            cache_writer.close()
+        except Exception:
+            pass
     log(f"📊 Summary: {direct_ok} invoice(s) fetched directly (fast, no browser) · "
-        f"{len(chrome_list)} via the browser.")
+        f"{len(chrome_list)} via the browser · {reused} reused from an earlier run"
+        f"{f' · EFRIS throttled us {_http_gate.pauses}x (handled automatically)' if _http_gate.pauses else ''}.", force=True)
     log("🔗 Matching report rows to invoice items...")
     # Match against the remaining, unclaimed items for each invoice — once an
     # item is used it's removed, so two report rows with the same description
@@ -1133,7 +1265,7 @@ def run_efris_enrichment(purchases_df, log_placeholder, progress_bar):
         else:
             log(f"[Row {row_num}] ⚠️  No match for '{desc}'")
 
-    log("🏁 All rows processed.")
+    log("🏁 All rows processed.", force=True)
     return purchases_df
 
 
@@ -2572,13 +2704,17 @@ elif tool == "EFRIS Invoice Enricher":
             except Exception as e:
                 st.error(str(e)); purchases_file = None
 
+    resume_ok = st.checkbox(
+        "Reuse invoices already fetched in an earlier run (lets an interrupted run resume where it stopped)",
+        value=True, key="ef_resume")
+
     if st.button("Start enrichment", type="primary", use_container_width=True,
                  disabled=(purchases_file is None), key="ef_run"):
         prog   = st.progress(0, text="Starting...")
         log_ph = st.empty()
         try:
             df       = _read_purchases_report(purchases_file)
-            enriched = run_efris_enrichment(df, log_ph, prog)
+            enriched = run_efris_enrichment(df, log_ph, prog, use_cache=resume_ok)
             prog.progress(1.0, text="✅ Done!")
             st.session_state["efris_enriched_df"] = enriched
             st.session_state["efris_out_name"]    = out_name
