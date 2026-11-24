@@ -862,6 +862,8 @@ def _new_http_session():
 
 def _close_http_session(holder):
     s, holder[0] = holder[0], None
+    if len(holder) > 1:
+        holder[1] = 0
     if s is not None:
         try:
             s.close()
@@ -869,18 +871,21 @@ def _close_http_session(holder):
             pass
 
 
+class _InvoiceUnavailable(Exception):
+    """EFRIS answers normally for other invoices but has no PDF for this one."""
+
+
 class _EfrisRateGate:
     """Shared, adaptive pacing for the direct EFRIS requests.
 
     EFRIS accepts a steady stream but, if pushed too hard for too long, starts
     answering with an HTML page instead of the PDF for a few minutes. So every
-    request takes a turn here: requests are spaced out (and gently speed up
+    request takes a turn here: requests are spaced out (and slowly speed up
     while EFRIS keeps accepting them). When EFRIS starts rejecting, ALL
-    connections pause together, the pace is slowed, and the pause grows
-    (5s, 10s, 20s ... up to 2 minutes) until EFRIS accepts again. Only after
-    several minutes of this does an invoice get handed to the browser."""
-    START_INTERVAL = 0.22     # ~4.5 requests/second to begin with
-    MIN_INTERVAL = 0.18       # never faster than ~5.5 requests/second overall
+    connections pause together, the pace is halved, and the pause grows
+    (5s, 10s, 20s ... up to 2 minutes) until EFRIS accepts again."""
+    START_INTERVAL = 0.30     # ~3.3 requests/second to begin with
+    MIN_INTERVAL = 0.25       # never faster than ~4 requests/second overall
     MAX_INTERVAL = 2.0        # slowest pace after repeated rejections
 
     def __init__(self):
@@ -894,6 +899,8 @@ class _EfrisRateGate:
         self.backoff = 5.0
         self.ok_streak = 0
         self.pauses = 0
+        self.blocked_since = 0.0
+        self.canary = None          # an invoice number that is known to work
 
     def wait_turn(self):
         with self.lock:
@@ -903,49 +910,95 @@ class _EfrisRateGate:
         if start > now:
             time.sleep(start - now)
 
-    def good(self):
+    def good(self, fdn=None):
         with self.lock:
+            if self.canary is None and fdn:
+                self.canary = fdn
+            self.blocked_since = 0.0
             self.ok_streak += 1
-            if self.ok_streak >= 25:
+            if self.ok_streak >= 60:
                 self.ok_streak = 0
-                self.interval = max(self.MIN_INTERVAL, self.interval * 0.9)
+                self.interval = max(self.MIN_INTERVAL, self.interval * 0.95)
                 self.backoff = max(5.0, self.backoff / 2)
 
     def rejected(self):
         with self.lock:
             now = time.time()
             self.ok_streak = 0
+            if not self.blocked_since:
+                self.blocked_since = now
             if now < self.pause_until:
                 return        # already pausing for this wave of rejections
             self.pauses += 1
-            self.interval = min(self.MAX_INTERVAL, self.interval * 1.5)
+            self.interval = min(self.MAX_INTERVAL, self.interval * 2)
             self.pause_until = now + self.backoff
             self.backoff = min(120.0, self.backoff * 2)
 
+    def blocked_for(self):
+        return (time.time() - self.blocked_since) if self.blocked_since else 0.0
+
 
 _http_gate = _EfrisRateGate()
+EFRIS_SESSION_REUSE = 100      # start a fresh connection after this many requests
 
 
-def _fetch_pdf_http(holder, fdn, attempts=8):
-    """Return the invoice PDF bytes. `holder` is a one-item list owning the
-    worker's session so it can be swapped for a fresh one after a failure.
-    Raises only after several minutes of rejections (see _EfrisRateGate)."""
+def _is_pdf_response(r):
+    return r.status_code == 200 and r.content[:4] == b"%PDF"
+
+
+def _http_canary_ok():
+    """True if EFRIS still serves an invoice that worked earlier. Used to tell
+    'EFRIS is refusing everyone' (pause) from 'this one invoice has no PDF'."""
+    fdn = _http_gate.canary
+    if not fdn:
+        return False
+    _http_gate.wait_turn()
+    holder = [None, 0]
+    try:
+        holder[0] = _new_http_session()
+        return _is_pdf_response(holder[0].get(EFRIS_PDF_URL.format(fdn), timeout=30))
+    except Exception:
+        return False
+    finally:
+        _close_http_session(holder)
+
+
+def _fetch_pdf_http(holder, fdn, max_block_seconds=1200):
+    """Return the invoice PDF bytes. `holder` is [session, requests_used].
+
+    Raises _InvoiceUnavailable if EFRIS is healthy but has no PDF for this
+    invoice; raises RuntimeError only if EFRIS refuses everything for more
+    than `max_block_seconds`."""
     last = "unknown error"
-    for attempt in range(attempts):
+    odd_replies = 0
+    while True:
         _http_gate.wait_turn()
+        got_reply = False
         try:
+            if holder[0] is not None and holder[1] >= EFRIS_SESSION_REUSE:
+                _close_http_session(holder)
             if holder[0] is None:
                 holder[0] = _new_http_session()
+                holder[1] = 0
             r = holder[0].get(EFRIS_PDF_URL.format(fdn), timeout=30)
-            if r.status_code == 200 and r.content[:4] == b"%PDF":
-                _http_gate.good()
+            holder[1] += 1
+            if _is_pdf_response(r):
+                _http_gate.good(fdn)
                 return r.content
+            got_reply = True
             last = f"HTTP {r.status_code}, response was not a PDF"
         except Exception as e:
             last = f"{type(e).__name__}: {str(e)[:80]}"
         _close_http_session(holder)   # next attempt starts a fresh session
+        if got_reply and _http_canary_ok():
+            odd_replies += 1
+            if odd_replies >= 2:
+                raise _InvoiceUnavailable(last)
+            time.sleep(1)
+            continue
         _http_gate.rejected()
-    raise RuntimeError(last)
+        if _http_gate.blocked_for() > max_block_seconds:
+            raise RuntimeError(f"EFRIS kept refusing requests for over {int(max_block_seconds // 60)} minutes ({last})")
 
 
 # ── Saved progress (resume) ──────────────────────────────────────────────────
@@ -1081,7 +1134,7 @@ def run_efris_enrichment(purchases_df, log_placeholder, progress_bar, use_cache=
         http_res_q = queue.Queue()
 
         def http_worker():
-            holder = [None]
+            holder = [None, 0]
             try:
                 while True:
                     try:
@@ -1091,6 +1144,8 @@ def run_efris_enrichment(purchases_df, log_placeholder, progress_bar, use_cache=
                     try:
                         pdf = _fetch_pdf_http(holder, fdn)
                         http_res_q.put((fdn, _parse_pdf_bytes(pdf), None))
+                    except _InvoiceUnavailable as e:
+                        http_res_q.put((fdn, [], "UNAVAILABLE: " + str(e)))
                     except Exception as e:
                         http_res_q.put((fdn, [], str(e)))
             finally:
@@ -1101,16 +1156,34 @@ def run_efris_enrichment(purchases_df, log_placeholder, progress_bar, use_cache=
         for t in http_threads:
             t.start()
 
-        handled, chrome_list = set(), []
+        paused_seen = [0]
+
+        def show_pause_status():
+            # Workers can't touch the UI, so the main thread tells the user
+            # when everything is waiting on an EFRIS rate limit.
+            remaining = _http_gate.pause_until - time.time()
+            if remaining > 1:
+                if _http_gate.pauses != paused_seen[0]:
+                    paused_seen[0] = _http_gate.pauses
+                    log(f"⏸️  EFRIS is rate-limiting requests — pausing automatically and retrying "
+                        f"(pause #{_http_gate.pauses}, up to {int(remaining)}s)...", force=True)
+                progress_bar.progress(min(n_done / total_fdns, 1.0),
+                                      text=f"{n_done}/{total_fdns} invoices scraped — paused ~{int(remaining)}s (EFRIS rate limit, automatic)")
+
+        handled, chrome_list, unavailable = set(), [], []
         while len(handled) < len(todo):
             try:
-                fdn, items, err = http_res_q.get(timeout=5)
+                fdn, items, err = http_res_q.get(timeout=2)
             except queue.Empty:
+                show_pause_status()
                 if not any(t.is_alive() for t in http_threads) and http_res_q.empty():
                     break   # workers are gone; whatever is unhandled goes to the browser
                 continue
             handled.add(fdn)
-            if err:
+            if err and err.startswith("UNAVAILABLE:"):
+                unavailable.append(fdn)
+                log(f"[FDN {fdn}] ⚠️  EFRIS has no PDF for this invoice number (other invoices are fine)")
+            elif err:
                 chrome_list.append(fdn)      # retry with the browser below
             else:
                 direct_ok += 1
@@ -1118,6 +1191,12 @@ def run_efris_enrichment(purchases_df, log_placeholder, progress_bar, use_cache=
         for t in http_threads:
             t.join()
         chrome_list += [f for f in todo if f not in handled]
+        if unavailable:
+            if len(unavailable) <= 25:
+                chrome_list += unavailable   # a handful: give the browser one last try
+            else:
+                for f in unavailable:        # many: not worth starting a browser for
+                    report(f, [], "not available on EFRIS")
         if chrome_list:
             log(f"↩️  {len(chrome_list)} invoice(s) could not be fetched directly — retrying them with the browser...")
     elif todo:
@@ -1304,6 +1383,61 @@ def _read_purchases_report(file_obj):
 
 def build_output_excel(df, sheet_name="Purchases Report",
                         highlight_cols=("Quantity", "Unit Measure", "Unit Price")):
+    """Same look as before (blue bold header, yellow Quantity/Unit Measure/Unit
+    Price cells, auto column widths) but written row by row with xlsxwriter's
+    constant-memory mode. The old pandas+openpyxl route held every cell in
+    memory (about 1.3 GB and a minute for ~150,000 rows), which is more than
+    Streamlit Community Cloud allows. Falls back to the old route only if
+    xlsxwriter is not installed."""
+    try:
+        import xlsxwriter
+    except Exception:
+        return _build_output_excel_openpyxl(df, sheet_name, highlight_cols)
+    from datetime import datetime as _dt, date as _date
+    output = BytesIO()
+    wb = xlsxwriter.Workbook(output, {"constant_memory": True, "nan_inf_to_errors": True})
+    ws = wb.add_worksheet(sheet_name[:31])
+    hdr_fmt = wb.add_format({"bold": True, "font_color": "#FFFFFF", "bg_color": "#0078D4", "align": "center"})
+    hi_fmt = wb.add_format({"bg_color": "#FFF2CC"})
+    date_fmt = wb.add_format({"num_format": "yyyy-mm-dd hh:mm:ss"})
+    hi_date_fmt = wb.add_format({"num_format": "yyyy-mm-dd hh:mm:ss", "bg_color": "#FFF2CC"})
+    cols = list(df.columns)
+    new_cols = set(highlight_cols)
+    is_hi = [str(c) in new_cols for c in cols]
+    for ci, c in enumerate(cols):
+        widest = len(str(c))
+        try:
+            widest = max(widest, int(df[c].fillna("").astype(str).str.len().max()))
+        except Exception:
+            pass
+        ws.set_column(ci, ci, min(widest + 4, 50))
+        ws.write_string(0, ci, str(c), hdr_fmt)
+    for ri, row in enumerate(df.itertuples(index=False, name=None), start=1):
+        for ci, v in enumerate(row):
+            hi = is_hi[ci]
+            if v is None or (not isinstance(v, str) and pd.isna(v)):
+                if hi:
+                    ws.write_blank(ri, ci, None, hi_fmt)
+                continue
+            if hasattr(v, "to_pydatetime"):
+                v = v.to_pydatetime()
+            elif hasattr(v, "item") and not isinstance(v, (str, bytes)):
+                v = v.item()
+            if isinstance(v, (_dt, _date)):
+                ws.write_datetime(ri, ci, v, hi_date_fmt if hi else date_fmt)
+            elif isinstance(v, bool):
+                ws.write_boolean(ri, ci, v, hi_fmt if hi else None)
+            elif isinstance(v, (int, float)):
+                ws.write_number(ri, ci, v, hi_fmt if hi else None)
+            else:
+                ws.write_string(ri, ci, str(v), hi_fmt if hi else None)
+    wb.close()
+    output.seek(0)
+    return output
+
+
+def _build_output_excel_openpyxl(df, sheet_name="Purchases Report",
+                                 highlight_cols=("Quantity", "Unit Measure", "Unit Price")):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name=sheet_name)
@@ -2693,9 +2827,19 @@ elif tool == "EFRIS Invoice Enricher":
             out_name = out_name.removesuffix(".xlsx").strip() + ".xlsx"
         if purchases_file:
             try:
-                prev = _read_purchases_report(purchases_file)
-                purchases_file.seek(0)
-                st.caption("Preview — first 5 rows")
+                # Large exports take a long time to read, so read once per file
+                # (not on every page rerun) and keep only a 5-row preview.
+                fkey = (purchases_file.name, purchases_file.size)
+                if st.session_state.get("ef_df_key") != fkey:
+                    with st.spinner("Reading the file (large exports can take a minute)..."):
+                        full_df = _read_purchases_report(purchases_file)
+                    st.session_state["ef_df"] = full_df
+                    st.session_state["ef_prev"] = full_df.head(5)
+                    st.session_state["ef_rows"] = len(full_df)
+                    st.session_state["ef_df_key"] = fkey
+                    purchases_file.seek(0)
+                prev = st.session_state["ef_prev"]
+                st.caption(f"Preview — first 5 rows  ·  {st.session_state.get('ef_rows', 0):,} rows in the file")
                 st.dataframe(prev.head(5), use_container_width=True)
                 missing = {"FDN", "Description of Goods"} - set(prev.columns)
                 if missing:
@@ -2713,11 +2857,17 @@ elif tool == "EFRIS Invoice Enricher":
         prog   = st.progress(0, text="Starting...")
         log_ph = st.empty()
         try:
-            df       = _read_purchases_report(purchases_file)
+            if (st.session_state.get("ef_df_key") == (purchases_file.name, purchases_file.size)
+                    and "ef_df" in st.session_state):
+                df = st.session_state.pop("ef_df")      # already read; hand it over (no second copy)
+            else:
+                purchases_file.seek(0)
+                df = _read_purchases_report(purchases_file)
             enriched = run_efris_enrichment(df, log_ph, prog, use_cache=resume_ok)
             prog.progress(1.0, text="✅ Done!")
             st.session_state["efris_enriched_df"] = enriched
             st.session_state["efris_out_name"]    = out_name
+            st.session_state.pop("efris_xlsx", None)   # force a fresh Excel build for this result
         except Exception as e:
             st.error(f"Error: {e}")
 
@@ -2728,13 +2878,16 @@ elif tool == "EFRIS Invoice Enricher":
     if "efris_enriched_df" in st.session_state:
         enriched = st.session_state["efris_enriched_df"]
         filled = enriched["Quantity"].notna().sum()
+        if "efris_xlsx" not in st.session_state:
+            with st.spinner("Preparing the Excel download..."):
+                st.session_state["efris_xlsx"] = build_output_excel(enriched).getvalue()
         with st.container(border=True):
             m1, m2, m3 = st.columns([1, 1, 1.4])
             m1.metric("Rows enriched", f"{filled:,}")
             m2.metric("Total rows", f"{len(enriched):,}")
             with m3:
                 st.download_button("⬇  Download enriched Excel",
-                    data=build_output_excel(enriched),
+                    data=st.session_state["efris_xlsx"],
                     file_name=st.session_state.get("efris_out_name", out_name),
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="ef_download", type="primary", use_container_width=True)
