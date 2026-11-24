@@ -585,24 +585,38 @@ def process_excel(template_file, report_file, damages_file=None, output_name="fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _parse_pdf_bytes(pdf_bytes):
+    """Read every item line from an EFRIS invoice PDF, across ALL pages.
+
+    Invoices with many products run onto a second (third, ...) page. The first
+    page has the 'Item / Quantity / Unit Measure / Unit Price' header; the
+    continuation pages usually have NO header and a slightly different column
+    layout (an extra blank column), so they are recognised by their numbered
+    rows ('33.', '34.', ...) once the item table has been seen."""
     import pdfplumber, io
     items = []
+    item_no = re.compile(r"^\d+\.?$")
+    text_row = re.compile(r"\d+\.?\s+(.+?)\s+(\d[\d,]*)\s+(\S[\S\-]*)\s+([\d,]+)\s+[\d,]+")
     try:
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            col_map = {}          # column positions; remembered across pages
+            in_items = False      # inside the goods & services section
             for page in pdf.pages:
+                before = len(items)
                 for table in (page.extract_tables() or []):
-                    header_idx, col_map = None, {}
+                    header_idx = None
                     for i, row in enumerate(table):
                         if not row:
                             continue
                         upper = [str(c or "").upper().strip() for c in row]
                         if "ITEM" in upper and "QUANTITY" in upper:
                             header_idx = i
+                            col_map = {}
                             for j, h in enumerate(upper):
                                 if h == "ITEM":                       col_map["item"]         = j
                                 elif h == "QUANTITY":                 col_map["quantity"]     = j
                                 elif "UNIT" in h and "MEASURE" in h: col_map["unit_measure"] = j
                                 elif "UNIT" in h and "PRICE" in h:   col_map["unit_price"]   = j
+                            in_items = True
                             continue
                         if header_idx is not None:
                             def g(key, fb, row=row):
@@ -617,23 +631,34 @@ def _parse_pdf_bytes(pdf_bytes):
                                     "unit_measure": g("unit_measure", 3),
                                     "unit_price": g("unit_price", 4),
                                 })
-                    if items:
-                        return items
+                        elif in_items and row[0] and item_no.match(str(row[0]).strip()):
+                            # Continuation page: numbered rows without a header.
+                            # Drop blank spacer columns, then the order is
+                            # No. | Item | Quantity | Unit Measure | Unit Price | Total | Tax
+                            cells = [str(c).strip() for c in row if c is not None and str(c).strip() != ""]
+                            if len(cells) >= 5 and not cells[1].upper().startswith("TAX"):
+                                items.append({
+                                    "item": cells[1],
+                                    "quantity": cells[2],
+                                    "unit_measure": cells[3],
+                                    "unit_price": cells[4],
+                                })
+                if len(items) > before:
+                    in_items = True
+                    continue                      # this page's items came from its table
+                # No usable table on this page: fall back to reading its text lines.
                 text = page.extract_text() or ""
-                in_d = False
                 for line in text.split("\n"):
                     line = line.strip()
                     if "Section D" in line or "Goods & Services" in line:
-                        in_d = True
+                        in_items = True
                         continue
                     if "Section E" in line or "Tax Details" in line:
+                        in_items = False
                         break
-                    if not in_d:
+                    if not in_items:
                         continue
-                    m = re.match(
-                        r"\d+\.?\s+(.+?)\s+(\d[\d,]*)\s+(\S[\S\-]*)\s+([\d,]+)\s+[\d,]+",
-                        line
-                    )
+                    m = text_row.match(line)
                     if m:
                         items.append({
                             "item": m.group(1).strip(),
@@ -1010,7 +1035,7 @@ def _fetch_pdf_http(holder, fdn, max_block_seconds=1200):
 # all sessions and lives only as long as the server's disk does (a full
 # reboot or redeploy clears it). Only invoices that returned items are saved,
 # so empty/failed ones are always retried.
-EFRIS_CACHE_VERSION = 1
+EFRIS_CACHE_VERSION = 2   # bumped: v1 entries could be missing items from page 2+ of long invoices
 EFRIS_CACHE_PATH = os.path.join(tempfile.gettempdir(), f"efris_invoice_cache_v{EFRIS_CACHE_VERSION}.jsonl")
 
 
